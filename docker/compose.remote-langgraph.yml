@@ -30,9 +30,9 @@ services:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      RESEARCH_NODE_HOST: 0.0.0.0
-      RESEARCH_NODE_PORT: "9002"
-      RESEARCH_NODE_PUBLIC_ENDPOINT: http://a2a-research:9002/invoke
+      A2A_NODE_HOST: 0.0.0.0
+      A2A_NODE_PORT: "9002"
+      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-research:9002/invoke
     ports:
       - "9012:9002"
     depends_on:
@@ -54,9 +54,9 @@ services:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      WRITER_NODE_HOST: 0.0.0.0
-      WRITER_NODE_PORT: "9003"
-      WRITER_NODE_PUBLIC_ENDPOINT: http://a2a-writer:9003/invoke
+      A2A_NODE_HOST: 0.0.0.0
+      A2A_NODE_PORT: "9003"
+      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-writer:9003/invoke
     ports:
       - "9013:9003"
     depends_on:

@@ -152,10 +152,10 @@ def research_with_env():
             env_pairs.extend(["-e", f"{k}={v}"])
         env_pairs.extend([
             "-e", "AMAZE_ORCHESTRATOR_URL=http://orchestrator:8001",
-            "-e", f"RESEARCH_NODE_PUBLIC_ENDPOINT={debug_endpoint}",
-            "-e", "RESEARCH_NODE_HOST=0.0.0.0",
-            "-e", "RESEARCH_NODE_PORT=9002",
-            "-e", "OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4317",
+            "-e", f"A2A_NODE_PUBLIC_ENDPOINT={debug_endpoint}",
+            "-e", "A2A_NODE_HOST=0.0.0.0",
+            "-e", "A2A_NODE_PORT=9002",
+            "-e", "OTEL_EXPORTER_OTLP_ENDPOINT=http://orchestrator:4317",
         ])
         cmd = [
             "docker", "run", "-d", "--name", container_name,

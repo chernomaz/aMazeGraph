@@ -102,35 +102,56 @@ async def _unregister_best_effort(orchestrator_url: str, body: dict) -> None:
         )
 
 
-def build_node_app(
+_REGISTERED_HANDLERS: list[tuple[str, str, NodeHandler]] = []
+
+
+def remote_node(*, graph_id: str, node_name: str):
+    """Decorator that registers an async handler as a remote node.
+
+    Multiple handlers may be decorated in a single Python process; serve_node()
+    will host all of them under one FastAPI app and dispatch /invoke calls by
+    (graph_id, node_name).
+    """
+
+    def wrapper(handler: NodeHandler) -> NodeHandler:
+        _REGISTERED_HANDLERS.append((graph_id, node_name, handler))
+        return handler
+
+    return wrapper
+
+
+def _build_handlers_app(
     *,
-    graph_id: str,
-    node_name: str,
-    handler: NodeHandler,
+    handlers: list[tuple[str, str, NodeHandler]],
     orchestrator_url: str,
     public_endpoint: str,
+    service_name: str,
 ) -> FastAPI:
-    register_body = {
-        "graph_id": graph_id,
-        "node_name": node_name,
-        "endpoint": public_endpoint,
+    handlers_map: dict[tuple[str, str], NodeHandler] = {
+        (gid, nname): h for gid, nname, h in handlers
     }
+    register_bodies = [
+        {"graph_id": gid, "node_name": nname, "endpoint": public_endpoint}
+        for gid, nname, _ in handlers
+    ]
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
-        _init_otel(service_name=f"a2a-{node_name}")
-        await _register_with_backoff(orchestrator_url, register_body)
-        logger.info(
-            "registered graph_id=%s node=%s endpoint=%s",
-            graph_id,
-            node_name,
-            public_endpoint,
-        )
+        _init_otel(service_name=service_name)
+        for body in register_bodies:
+            await _register_with_backoff(orchestrator_url, body)
+            logger.info(
+                "registered graph_id=%s node=%s endpoint=%s",
+                body["graph_id"],
+                body["node_name"],
+                public_endpoint,
+            )
         try:
             yield
         finally:
-            await _unregister_best_effort(orchestrator_url, register_body)
-            logger.info("unregistered node=%s", node_name)
+            for body in register_bodies:
+                await _unregister_best_effort(orchestrator_url, body)
+                logger.info("unregistered node=%s", body["node_name"])
 
     app = FastAPI(lifespan=lifespan)
 
@@ -154,6 +175,12 @@ def build_node_app(
         )
         if os.environ.get("AMAZE_DEBUG_BAD_PATCH") == "1":
             return {"state_patch": "not-a-dict"}
+        handler = handlers_map.get((req.graph_id, req.node_name))
+        if handler is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"no handler registered for graph_id={req.graph_id} node_name={req.node_name}",
+            )
         result = await handler(req.state, req.config)
         if not isinstance(result, dict):
             raise HTTPException(status_code=500, detail="handler-returned-non-dict")
@@ -161,10 +188,62 @@ def build_node_app(
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
-        return {"status": "ok", "graph_id": graph_id, "node_name": node_name}
+        return {
+            "status": "ok",
+            "handlers": [
+                {"graph_id": gid, "node_name": nname} for gid, nname, _ in handlers
+            ],
+        }
 
     return app
 
 
-def serve(app: FastAPI, host: str, port: int) -> None:
+def serve_node(
+    *,
+    host: str | None = None,
+    port: int | None = None,
+    public_host: str | None = None,
+    public_endpoint: str | None = None,
+    orchestrator_url: str | None = None,
+) -> None:
+    """Start a FastAPI server hosting every @remote_node-decorated handler in this process.
+
+    Resolution order for each parameter: explicit argument → env var → default.
+    Env vars: A2A_NODE_HOST, A2A_NODE_PORT, A2A_NODE_PUBLIC_HOST,
+    A2A_NODE_PUBLIC_ENDPOINT, AMAZE_ORCHESTRATOR_URL, OTEL_SERVICE_NAME.
+    """
+    if not _REGISTERED_HANDLERS:
+        raise RuntimeError(
+            "no @remote_node handlers registered; "
+            "decorate at least one async function before calling serve_node()"
+        )
+
+    host = host or os.environ.get("A2A_NODE_HOST", "0.0.0.0")
+    if port is None:
+        port_env = os.environ.get("A2A_NODE_PORT")
+        if not port_env:
+            raise RuntimeError("port must be set via argument or A2A_NODE_PORT env var")
+        port = int(port_env)
+
+    if public_endpoint is None:
+        public_endpoint = os.environ.get("A2A_NODE_PUBLIC_ENDPOINT")
+    if public_endpoint is None:
+        ph = public_host or os.environ.get("A2A_NODE_PUBLIC_HOST", "localhost")
+        public_endpoint = f"http://{ph}:{port}/invoke"
+
+    orchestrator_url = orchestrator_url or os.environ.get(
+        "AMAZE_ORCHESTRATOR_URL", "http://localhost:8001"
+    )
+
+    service_name = os.environ.get("OTEL_SERVICE_NAME") or (
+        "a2a-" + "-".join(sorted({n for _, n, _ in _REGISTERED_HANDLERS}))
+    )
+    setup_logging(service_name)
+
+    app = _build_handlers_app(
+        handlers=list(_REGISTERED_HANDLERS),
+        orchestrator_url=orchestrator_url,
+        public_endpoint=public_endpoint,
+        service_name=service_name,
+    )
     uvicorn.run(app, host=host, port=port, log_config=None)
