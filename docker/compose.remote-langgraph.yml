@@ -1,0 +1,86 @@
+name: amazegraph-remote-langgraph
+
+services:
+  orchestrator:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.orchestrator
+    environment:
+      REDIS_URL: redis://127.0.0.1:6379
+      ORCHESTRATOR_HOST: 0.0.0.0
+      ORCHESTRATOR_PORT: "8001"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://127.0.0.1:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+    ports:
+      - "8011:8001"
+      - "16696:16686"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:8001/health',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  a2a-research:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.a2a-node
+      args:
+        NODE_MODULE: examples.a2a_nodes.research_node
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      RESEARCH_NODE_HOST: 0.0.0.0
+      RESEARCH_NODE_PORT: "9002"
+      RESEARCH_NODE_PUBLIC_ENDPOINT: http://a2a-research:9002/invoke
+    ports:
+      - "9012:9002"
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9002/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  a2a-writer:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.a2a-node
+      args:
+        NODE_MODULE: examples.a2a_nodes.writer_node
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      WRITER_NODE_HOST: 0.0.0.0
+      WRITER_NODE_PORT: "9003"
+      WRITER_NODE_PUBLIC_ENDPOINT: http://a2a-writer:9003/invoke
+    ports:
+      - "9013:9003"
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9003/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  main-langgraph:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.main
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+      a2a-research:
+        condition: service_healthy
+      a2a-writer:
+        condition: service_healthy
+    restart: "no"

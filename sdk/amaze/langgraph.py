@@ -1,0 +1,416 @@
+from __future__ import annotations
+
+import json
+import logging
+import os
+from datetime import datetime, timezone
+from typing import Any, Awaitable, Callable
+
+import httpx
+from langchain_core.runnables import RunnableConfig
+from langgraph.graph import StateGraph
+from opentelemetry import trace
+
+logger = logging.getLogger(__name__)
+
+_OTEL_INITIALIZED = False
+
+
+class AmazeGraphError(Exception):
+    pass
+
+
+class RemoteNodeNotRegistered(AmazeGraphError):
+    def __init__(self, graph_id: str, node_name: str) -> None:
+        super().__init__(
+            f"remote node not registered: graph_id={graph_id} node_name={node_name}"
+        )
+        self.graph_id = graph_id
+        self.node_name = node_name
+
+
+class RemoteNodeInvokeError(AmazeGraphError):
+    def __init__(
+        self,
+        graph_id: str,
+        node_name: str,
+        status: int | None,
+        body: str,
+    ) -> None:
+        super().__init__(
+            f"remote node invoke failed: graph_id={graph_id} node_name={node_name} "
+            f"status={status} body={body[:512]}"
+        )
+        self.graph_id = graph_id
+        self.node_name = node_name
+        self.status = status
+        self.body = body
+
+
+class InvalidStatePatch(AmazeGraphError):
+    def __init__(self, graph_id: str, node_name: str, payload: Any) -> None:
+        super().__init__(
+            f"remote node returned invalid state_patch: graph_id={graph_id} "
+            f"node_name={node_name} payload={payload!r}"
+        )
+        self.graph_id = graph_id
+        self.node_name = node_name
+        self.payload = payload
+
+
+class OrchestratorUnavailable(AmazeGraphError):
+    pass
+
+
+class OrchestratorClient:
+    def __init__(self, base_url: str, timeout: float = 10.0) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self._client: httpx.AsyncClient | None = None
+
+    def _get_client(self) -> httpx.AsyncClient:
+        if self._client is None:
+            self._client = httpx.AsyncClient(
+                base_url=self.base_url, timeout=self.timeout
+            )
+        return self._client
+
+    async def __aenter__(self) -> "OrchestratorClient":
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        await self.close()
+
+    async def register_graph(
+        self,
+        graph_id: str,
+        nodes: list[str],
+        edges: list[tuple[str, str]],
+    ) -> None:
+        client = self._get_client()
+        body = {
+            "graph_id": graph_id,
+            "nodes": nodes,
+            "edges": [list(e) for e in edges],
+        }
+        try:
+            r = await client.post("/register/graph", json=body)
+        except httpx.ConnectError as exc:
+            raise OrchestratorUnavailable(
+                f"cannot reach orchestrator at {self.base_url}: {exc}"
+            ) from exc
+        if r.status_code // 100 != 2:
+            raise OrchestratorUnavailable(
+                f"register_graph failed: status={r.status_code} body={r.text[:512]}"
+            )
+
+    async def resolve_node(self, graph_id: str, node_name: str) -> str:
+        client = self._get_client()
+        try:
+            r = await client.get(f"/resolve/node/{graph_id}/{node_name}")
+        except httpx.ConnectError as exc:
+            raise OrchestratorUnavailable(
+                f"cannot reach orchestrator at {self.base_url}: {exc}"
+            ) from exc
+        if r.status_code == 404:
+            raise RemoteNodeNotRegistered(graph_id, node_name)
+        if r.status_code // 100 != 2:
+            raise OrchestratorUnavailable(
+                f"resolve_node failed: status={r.status_code} body={r.text[:512]}"
+            )
+        return r.json()["endpoint"]
+
+    async def emit_event(self, run_id: str, event: dict) -> None:
+        client = self._get_client()
+        try:
+            r = await client.post(f"/runs/{run_id}/events", json=event)
+            if r.status_code // 100 != 2:
+                logger.warning(
+                    "emit_event non-2xx: run_id=%s status=%s body=%s",
+                    run_id,
+                    r.status_code,
+                    r.text[:256],
+                )
+        except Exception as exc:
+            logger.warning("emit_event failed: run_id=%s err=%s", run_id, exc)
+
+    async def close(self) -> None:
+        if self._client is not None:
+            await self._client.aclose()
+            self._client = None
+
+
+class AmazeGraph:
+    def __init__(
+        self,
+        state_schema: Any,
+        *,
+        graph_id: str,
+        orchestrator_url: str | None = None,
+    ) -> None:
+        self.graph_id = graph_id
+        self.graph = StateGraph(state_schema)
+        url = orchestrator_url or os.environ.get("AMAZE_ORCHESTRATOR_URL")
+        if not url:
+            raise ValueError(
+                "orchestrator_url not provided and AMAZE_ORCHESTRATOR_URL "
+                "env var is not set"
+            )
+        self.orchestrator_url = url.rstrip("/")
+        self.orchestrator = OrchestratorClient(self.orchestrator_url)
+        self.remote_nodes: set[str] = set()
+        self._nodes: list[str] = []
+        self._edges: list[tuple[str, str]] = []
+        self._entry: str | None = None
+        self._http_client: httpx.AsyncClient | None = None
+
+    def add_node(self, name: str, action: Any, *args: Any, **kwargs: Any) -> "AmazeGraph":
+        self._nodes.append(name)
+        self.graph.add_node(name, action, *args, **kwargs)
+        return self
+
+    def remote_node(self, name: str) -> "AmazeGraph":
+        self.remote_nodes.add(name)
+        self._nodes.append(name)
+        self.graph.add_node(name, self._make_remote_proxy(name))
+        return self
+
+    def add_edge(self, start: str, end: str) -> "AmazeGraph":
+        self._edges.append((start, end))
+        self.graph.add_edge(start, end)
+        return self
+
+    def add_conditional_edges(
+        self,
+        source: str,
+        path: Any,
+        path_map: Any = None,
+        then: Any = None,
+    ) -> "AmazeGraph":
+        self.graph.add_conditional_edges(source, path, path_map, then)
+        return self
+
+    def set_entry_point(self, node: str) -> "AmazeGraph":
+        self._entry = node
+        self.graph.set_entry_point(node)
+        return self
+
+    def compile(self, *args: Any, **kwargs: Any) -> Any:
+        body = {
+            "graph_id": self.graph_id,
+            "nodes": list(self._nodes),
+            "edges": [list(e) for e in self._edges],
+        }
+        try:
+            r = httpx.post(
+                f"{self.orchestrator_url}/register/graph",
+                json=body,
+                timeout=10.0,
+            )
+        except httpx.ConnectError as exc:
+            raise OrchestratorUnavailable(
+                f"cannot reach orchestrator at {self.orchestrator_url}: {exc}"
+            ) from exc
+        if r.status_code // 100 != 2:
+            raise OrchestratorUnavailable(
+                f"register_graph failed: status={r.status_code} body={r.text[:512]}"
+            )
+        return self.graph.compile(*args, **kwargs)
+
+    def _get_http_client(self) -> httpx.AsyncClient:
+        if self._http_client is None:
+            self._http_client = httpx.AsyncClient(timeout=30.0)
+        return self._http_client
+
+    def _make_event(
+        self,
+        event_type: str,
+        node_name: str,
+        trace_id: str | None,
+        status: str | None = None,
+        error: str | None = None,
+    ) -> dict:
+        return {
+            "event": event_type,
+            "graph_id": self.graph_id,
+            "node_name": node_name,
+            "trace_id": trace_id,
+            "status": status,
+            "error": error,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _make_remote_proxy(
+        self, node_name: str
+    ) -> Callable[..., Awaitable[dict]]:
+        async def remote_proxy(
+            state: dict,
+            config: RunnableConfig | None = None,
+        ) -> dict:
+            cfg: dict = dict(config) if isinstance(config, dict) else {}
+            metadata = cfg.get("metadata") or {}
+
+            run_id = (state.get("run_id") if isinstance(state, dict) else None) or metadata.get("run_id")
+            trace_id = (state.get("trace_id") if isinstance(state, dict) else None) or metadata.get("trace_id")
+
+            config_subset_raw = {
+                "tags": cfg.get("tags"),
+                "metadata": cfg.get("metadata"),
+                "configurable": cfg.get("configurable"),
+                "run_name": cfg.get("run_name"),
+                "recursion_limit": cfg.get("recursion_limit"),
+            }
+            config_subset = {k: v for k, v in config_subset_raw.items() if v is not None}
+
+            tracer = trace.get_tracer(__name__)
+            with tracer.start_as_current_span("amazegraph.invoke_remote") as span:
+                span.set_attribute("amaze.graph_id", self.graph_id)
+                span.set_attribute("amaze.node_name", node_name)
+                if run_id:
+                    span.set_attribute("amaze.run_id", run_id)
+                if trace_id:
+                    span.set_attribute("amaze.trace_id", trace_id)
+
+                try:
+                    endpoint = await self.orchestrator.resolve_node(
+                        self.graph_id, node_name
+                    )
+                except RemoteNodeNotRegistered as exc:
+                    if run_id:
+                        await self.orchestrator.emit_event(
+                            run_id,
+                            self._make_event(
+                                "node-error",
+                                node_name,
+                                trace_id,
+                                status="error",
+                                error="node-not-registered",
+                            ),
+                        )
+                    raise
+
+                if run_id:
+                    await self.orchestrator.emit_event(
+                        run_id,
+                        self._make_event("node-enter", node_name, trace_id),
+                    )
+
+                payload = {
+                    "graph_id": self.graph_id,
+                    "node_name": node_name,
+                    "run_id": run_id,
+                    "trace_id": trace_id,
+                    "state": state,
+                    "config": config_subset,
+                }
+
+                client = self._get_http_client()
+                try:
+                    response = await client.post(endpoint, json=payload)
+                except httpx.TransportError as exc:
+                    if run_id:
+                        await self.orchestrator.emit_event(
+                            run_id,
+                            self._make_event(
+                                "node-error",
+                                node_name,
+                                trace_id,
+                                status="error",
+                                error=f"transport: {exc}",
+                            ),
+                        )
+                    raise RemoteNodeInvokeError(
+                        self.graph_id, node_name, None, str(exc)
+                    ) from exc
+
+                if response.status_code // 100 != 2:
+                    body_text = response.text
+                    if run_id:
+                        await self.orchestrator.emit_event(
+                            run_id,
+                            self._make_event(
+                                "node-error",
+                                node_name,
+                                trace_id,
+                                status="error",
+                                error=f"http-{response.status_code}",
+                            ),
+                        )
+                    raise RemoteNodeInvokeError(
+                        self.graph_id, node_name, response.status_code, body_text
+                    )
+
+                try:
+                    body = response.json()
+                except json.JSONDecodeError as exc:
+                    if run_id:
+                        await self.orchestrator.emit_event(
+                            run_id,
+                            self._make_event(
+                                "node-error",
+                                node_name,
+                                trace_id,
+                                status="error",
+                                error="invalid-json",
+                            ),
+                        )
+                    raise InvalidStatePatch(
+                        self.graph_id, node_name, response.text
+                    ) from exc
+
+                state_patch = body.get("state_patch")
+                if not isinstance(state_patch, dict):
+                    if run_id:
+                        await self.orchestrator.emit_event(
+                            run_id,
+                            self._make_event(
+                                "node-error",
+                                node_name,
+                                trace_id,
+                                status="error",
+                                error="invalid-state-patch",
+                            ),
+                        )
+                    raise InvalidStatePatch(self.graph_id, node_name, body)
+
+                if run_id:
+                    await self.orchestrator.emit_event(
+                        run_id,
+                        self._make_event(
+                            "node-exit", node_name, trace_id, status="ok"
+                        ),
+                    )
+                return state_patch
+
+        return remote_proxy
+
+    async def aclose(self) -> None:
+        if self._http_client is not None:
+            await self._http_client.aclose()
+            self._http_client = None
+        await self.orchestrator.close()
+
+
+def _init_otel(service_name: str) -> None:
+    global _OTEL_INITIALIZED
+    if _OTEL_INITIALIZED:
+        return
+    endpoint = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    if not endpoint:
+        return
+
+    from opentelemetry.sdk.resources import Resource
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import BatchSpanProcessor
+    from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import (
+        OTLPSpanExporter,
+    )
+    from opentelemetry.instrumentation.httpx import HTTPXClientInstrumentor
+
+    resource = Resource.create({"service.name": service_name})
+    provider = TracerProvider(resource=resource)
+    exporter = OTLPSpanExporter(endpoint=endpoint, insecure=True)
+    provider.add_span_processor(BatchSpanProcessor(exporter))
+    trace.set_tracer_provider(provider)
+    HTTPXClientInstrumentor().instrument()
+    _OTEL_INITIALIZED = True

@@ -1,0 +1,27 @@
+FROM jaegertracing/all-in-one:1.57 AS jaeger
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends redis-server wget \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=jaeger /go/bin/all-in-one-linux /usr/local/bin/jaeger-all-in-one
+
+COPY requirements.txt /app/requirements.txt
+RUN pip install -r /app/requirements.txt
+
+COPY services /app/services
+COPY docker/orchestrator-entrypoint.sh /app/orchestrator-entrypoint.sh
+RUN chmod +x /app/orchestrator-entrypoint.sh
+
+EXPOSE 8001 16686 4317
+
+CMD ["/app/orchestrator-entrypoint.sh"]
