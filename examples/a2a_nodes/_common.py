@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import sys
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 from typing import Any, AsyncIterator, Awaitable, Callable
 
 import httpx
@@ -16,7 +18,42 @@ from sdk.amaze.langgraph import _init_otel
 
 logger = logging.getLogger(__name__)
 
-NodeHandler = Callable[[dict, dict], Awaitable[dict]]
+NodeHandler = Callable[..., Awaitable[dict]]
+
+
+class RuntimeNotAvailable(Exception):
+    """Raised when a remote node tries to use a Runtime feature that is not
+    available in distributed mode (e.g. runtime.store, runtime.stream_writer).
+    """
+
+
+class Runtime:
+    """Stub Runtime exposed to remote node handlers.
+
+    Only `runtime.context` is populated from the wire `runtime_context` field.
+    `runtime.store` (capability #22) and `runtime.stream_writer` (capability
+    #24) are not available across the wire — accessing them raises
+    `RuntimeNotAvailable`.
+    """
+
+    def __init__(self, context: dict | None = None) -> None:
+        self._context = SimpleNamespace(**(context or {}))
+
+    @property
+    def context(self) -> SimpleNamespace:
+        return self._context
+
+    @property
+    def store(self) -> Any:
+        raise RuntimeNotAvailable(
+            "runtime.store not available in distributed mode (capability #22)"
+        )
+
+    @property
+    def stream_writer(self) -> Any:
+        raise RuntimeNotAvailable(
+            "runtime.stream_writer not available in distributed mode (capability #24)"
+        )
 
 
 class _HealthcheckFilter(logging.Filter):
@@ -51,6 +88,7 @@ class InvokeRequest(BaseModel):
     trace_id: str | None = None
     state: dict[str, Any]
     config: dict[str, Any] = {}
+    runtime_context: dict[str, Any] = {}
 
 
 class InvokeResponse(BaseModel):
@@ -71,7 +109,7 @@ async def _register_with_backoff(
                 r = await client.post(
                     f"{orchestrator_url}/register/node", json=body
                 )
-            except (httpx.ConnectError, httpx.ReadError) as exc:
+            except httpx.TransportError as exc:
                 last_exc = exc
                 await asyncio.sleep(delay)
                 continue
@@ -103,6 +141,38 @@ async def _unregister_best_effort(orchestrator_url: str, body: dict) -> None:
 
 
 _REGISTERED_HANDLERS: list[tuple[str, str, NodeHandler]] = []
+
+
+def _handler_accepts_runtime(handler: NodeHandler) -> bool:
+    """Return True if the handler signature has a 3rd parameter named
+    `runtime` or annotated `Runtime`. Used to decide whether to inject the
+    Runtime stub when dispatching /invoke.
+    """
+    try:
+        sig = inspect.signature(handler)
+    except (TypeError, ValueError):
+        return False
+    params = [
+        p
+        for p in sig.parameters.values()
+        if p.kind
+        in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    ]
+    if len(params) >= 3:
+        return True
+    for p in params:
+        if p.name == "runtime":
+            return True
+        ann = p.annotation
+        if ann is Runtime:
+            return True
+        if isinstance(ann, str) and ann == "Runtime":
+            return True
+    return False
 
 
 def remote_node(*, graph_id: str, node_name: str):
@@ -167,11 +237,14 @@ def _build_handlers_app(
     @app.post("/invoke")
     async def invoke(req: InvokeRequest) -> dict[str, Any]:
         logger.info(
-            "invoke graph_id=%s node_name=%s run_id=%s trace_id=%s",
+            "invoke graph_id=%s node_name=%s run_id=%s trace_id=%s "
+            "config_keys=%s runtime_context=%s",
             req.graph_id,
             req.node_name,
             req.run_id,
             req.trace_id,
+            list(req.config.keys()),
+            req.runtime_context,
         )
         if os.environ.get("AMAZE_DEBUG_BAD_PATCH") == "1":
             return {"state_patch": "not-a-dict"}
@@ -181,7 +254,11 @@ def _build_handlers_app(
                 status_code=404,
                 detail=f"no handler registered for graph_id={req.graph_id} node_name={req.node_name}",
             )
-        result = await handler(req.state, req.config)
+        if _handler_accepts_runtime(handler):
+            runtime = Runtime(req.runtime_context or {})
+            result = await handler(req.state, req.config, runtime)
+        else:
+            result = await handler(req.state, req.config)
         if not isinstance(result, dict):
             raise HTTPException(status_code=500, detail="handler-returned-non-dict")
         return {"state_patch": result}

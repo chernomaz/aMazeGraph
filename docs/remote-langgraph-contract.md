@@ -1,6 +1,9 @@
-# Remote LangGraph Node Execution — Sprint 1 Contract
+# Remote LangGraph Node Execution — Contract
 
-This document is the binding contract between the four moving parts in Sprint 1:
+Sprint 1 + Sprint 2 addenda. Sprint 2 sections live under § 9 "Sprint 2
+addendum" so the original Sprint 1 contract remains the binding floor.
+
+This document is the binding contract between the four moving parts:
 
 ```
 ┌──────────────────────┐       ┌────────────────────┐       ┌──────────────────────┐
@@ -262,3 +265,238 @@ edges; `Send`; `Command(update, goto)`; `interrupt()`; checkpointers; multi-host
 deployment; proxy / MCP / Envoy; UI / dashboards; retry policy on remote-node
 failure; full `runtime` propagation; local callbacks across the wire; caching;
 streaming responses (`POST /invoke` is request/response only).
+
+---
+
+## 9. Sprint 2 addendum
+
+Sprint 2 adds support for 13 of the 28 LangGraph node capabilities tracked in
+`Features.md`. None of the additions break Sprint 1 clients — all wire changes
+are additive (new optional request fields, new response sibling keys are not
+introduced in Sprint 2; reducer behavior is local to the driver).
+
+### 9.1 State-schema reducers
+
+LangGraph reducers run **locally** inside the driver when a returned
+`state_patch` is merged into the channel. Remote nodes do not know about
+reducers — they just return their patch.
+
+The contract obligation falls on the **state schema author**:
+
+> **Rule.** Any field that two or more concurrent branches can write **MUST**
+> be declared with a reducer in the state schema (`Annotated[Type,
+> reducer]`). Fields without a reducer are last-write-wins, and "last" is
+> non-deterministic under parallel execution.
+
+Reducers shipped / commonly used:
+
+- **None** (plain `Type`) — overwrite (default).
+- **`operator.add`** — concatenation/sum for `list`, `tuple`, `int`, `float`,
+  `str`. Does **not** work for `dict` (no `+` operator on dicts).
+- **`langgraph.graph.message.add_messages`** — message-history merge with
+  dedup-by-id; accepts dict-form messages and converts to `BaseMessage`;
+  honors `RemoveMessage(id=...)` sentinels.
+- **Custom callable** `(current, update) -> new` — must be commutative and
+  associative if used under parallel writes.
+
+**Sprint 2 demo schema** (`examples/remote_langgraph/main.py`):
+
+```python
+from typing import Annotated, TypedDict
+import operator
+from langgraph.graph.message import add_messages
+from langchain_core.messages import BaseMessage
+
+class GraphState(TypedDict, total=False):
+    run_id: str
+    trace_id: str
+    request: str
+    research_result: str
+    final_answer: str
+    log_trail:  Annotated[list[str], operator.add]      # append, never overwrite
+    results:    Annotated[list[str], operator.add]      # parallel-fan-out target
+    messages:   Annotated[list[BaseMessage], add_messages]  # MessagesState semantics
+    mode: str
+    echoed_thread: str
+    echoed_tenant: str
+```
+
+### 9.2 Message serialization across the wire
+
+`BaseMessage` instances are not JSON-serializable as-is. The SDK provides
+`sdk/amaze/_messages.py` with two helpers:
+
+```python
+def serialize_messages(messages: list[BaseMessage]) -> list[dict]: ...
+def deserialize_messages(items: list[dict]) -> list[BaseMessage]: ...
+```
+
+**Wire shape** (one message):
+```json
+{ "role": "human|assistant|system|tool",
+  "content": "...",
+  "id": "msg_abc",
+  "tool_calls": [...],     // assistant only, optional
+  "tool_call_id": "...",   // tool only
+  "additional_kwargs": {}, // optional pass-through
+  "response_metadata": {}  // optional pass-through
+}
+```
+
+Conventions:
+- The proxy serializes `state["messages"]` (and any other `BaseMessage`-typed
+  field declared in the state schema) before POSTing. The remote `serve_node`
+  deserializes when the handler is annotated to receive `BaseMessage` objects;
+  otherwise leaves the dicts as-is.
+- The remote node's returned `state_patch` may include either dict-form or
+  `BaseMessage`-form messages; both work because `add_messages` accepts
+  either. The proxy normalizes to dict-form before returning.
+- Message `id`s are preserved end-to-end so `add_messages` dedup works.
+
+### 9.3 `runtime_context` field
+
+A new optional top-level field on the `/invoke` request body:
+
+```json
+{
+  "graph_id": "...",
+  "node_name": "...",
+  "run_id": "...",
+  "trace_id": "...",
+  "state": { ... },
+  "config": { ... },
+  "runtime_context": {
+    "tenant_id": "acme",
+    "model_name": "gpt-4o-mini"
+  }
+}
+```
+
+Rules:
+- `runtime_context` is a JSON object. Keys and values must be
+  JSON-serializable (no live Python objects, no DB handles, no callable
+  references).
+- The driver sources `runtime_context` from `RunnableConfig.configurable`
+  under the dedicated key `__amaze_runtime_context__` (so it doesn't collide
+  with general `configurable` keys). Authors who want to set it call the
+  forthcoming SDK helper `AmazeGraph.with_runtime_context({...})` (T4) or pass
+  it via `app.invoke(state, config={"configurable": {"__amaze_runtime_context__": {...}}})`.
+- On the remote side, `serve_node` reconstructs a stub `Runtime` exposing
+  `runtime.context` as a dataclass-like attribute namespace. Access to
+  `runtime.store` or `runtime.stream_writer` raises a clear
+  `RuntimeNotAvailable` error directing authors to the relevant Hard-tier
+  capabilities (#22 store, #24 streaming).
+- Older clients omitting `runtime_context` → server treats it as `{}`.
+  Backwards-compatible.
+
+### 9.4 Conditional routing with remote targets
+
+LangGraph's `add_conditional_edges` runs the routing function locally in the
+driver — there is no wire change. The router decides which node to invoke
+next; if that node is a `remote_node`, the existing `/invoke` flow handles it.
+
+Author obligations:
+- The router function must return a node name (or list of names for
+  parallel-fan-out via conditional edges) that exists in the graph manifest.
+- The orchestrator **does not** validate router outputs in Sprint 2 — that
+  belongs to capability #14 (`Command(goto)`) in a future sprint.
+
+Example:
+```python
+def route_by_mode(state: GraphState) -> str:
+    return "researcher_a" if state["mode"] == "fast" else "researcher_b"
+
+graph.add_conditional_edges(
+    "planner",
+    route_by_mode,
+    {"researcher_a": "researcher_a", "researcher_b": "researcher_b"},
+)
+```
+
+### 9.5 Parallel fan-out (real concurrency)
+
+When a node has multiple outgoing static edges to remote nodes, LangGraph
+fires both branches in the same superstep. The driver invokes them
+**concurrently** via `asyncio.gather(...)`-equivalent behavior inside the
+LangGraph runtime; the AmazeGraph proxy does not need to do anything special
+beyond ensuring the httpx client pool can serve concurrent connections.
+
+Operational notes:
+- The `OrchestratorClient` httpx connection pool defaults to 100 concurrent
+  connections (httpx default), which is sufficient for any reasonable fan-out
+  width in Sprint 2.
+- Concurrent `XADD run:{run_id}:events` calls are atomic per call and assigned
+  monotonic Stream IDs by Redis. Event ordering inside a superstep is
+  arrival-order, not declaration-order — tests must not assume otherwise.
+- Wall-clock timestamps in `node-enter` events for sibling branches will
+  **overlap**. ST-RLG-13 asserts this overlap as the proof of concurrency.
+- State schema **must** declare a reducer (§9.1) for any field two siblings
+  write, otherwise one patch silently overwrites the other.
+
+### 9.6 LLM and tool calls inside remote nodes (Option A)
+
+Sprint 2 locks the **observability-only** posture for cases #5 and #6: the
+distributed runtime does not intercept, wrap, or enforce LLM/tool calls
+beyond what stock LangGraph itself provides.
+
+What the runtime guarantees:
+- OTel `traceparent` is propagated to the remote node (already true in S1).
+  LangChain's auto-instrumentation creates child spans for `BaseChatModel`
+  and `BaseTool` calls; they nest correctly under the `amazegraph.invoke_remote`
+  span in Jaeger.
+- If both the driver and the remote node set
+  `LANGCHAIN_TRACING_V2=true` and the same `LANGCHAIN_PROJECT`, LangSmith
+  shows one merged run tree.
+
+What the runtime does **NOT** guarantee:
+- Token / dollar budgets.
+- Tool allowlists.
+- PII / DLP filtering of prompts.
+- Audit log of LLM/tool calls in our Redis Stream (the stream only sees
+  `node-enter` / `node-exit`).
+
+Authors who need any of those must add them inside the remote node code or
+via an external proxy (LiteLLM, etc.).
+
+### 9.7 MCP integration
+
+Sprint 2 vendors a FastMCP server at `examples/mcp_server/` (copied from
+`/home/ubuntu/data/cloude/newAmazeControlPlane/aMaze/examples/mcp_server/`).
+
+- The MCP server runs as a separate compose service named `mcp`,
+  transport `streamable-http`, port 8000 internal.
+- It auto-discovers LangChain `@tool` functions from `examples/mcp_server/tools/*.py`.
+- Sprint 2's `examples/a2a_nodes/llm_tool_node.py` connects to the MCP
+  server via `langchain-mcp-adapters` (or direct `fastmcp.Client`), binds
+  the discovered tools to a `ChatOpenAI` instance, and lets the model
+  decide which tool to call.
+- The MCP server is independent of the orchestrator — it does not register
+  with `/register/node`. It's a tool host, not a graph node.
+- Calls to external services (OpenAI, Tavily) require `OPENAI_API_KEY` and
+  `TAVILY_API_KEY` in the environment. The compose file passes them through
+  from the host's `.env`. Tests that depend on these keys SKIP with a clear
+  message when keys are absent.
+
+### 9.8 Updated request schema (`POST /invoke`)
+
+```json
+{
+  "graph_id": "...",
+  "node_name": "...",
+  "run_id": "...",
+  "trace_id": "...",
+  "state": { ... },                                  // may contain serialized messages
+  "config": {
+    "tags": [...],
+    "metadata": { ... },
+    "configurable": { ... },
+    "run_name": null,
+    "recursion_limit": 25
+  },
+  "runtime_context": { ... }                         // NEW in S2; optional
+}
+```
+
+Response shape unchanged from Sprint 1 (`{"state_patch": dict}`). Sprint 2
+clients **continue to** ignore unknown keys in the response, in preparation
+for `command` / `interrupt` siblings in S4+.

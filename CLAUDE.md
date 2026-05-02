@@ -1,3 +1,29 @@
+## 1. Project goal
+
+**aMazeGraph builds full support for remote-node execution in LangGraph.**
+
+A LangGraph program runs in one process (the driver), but specific nodes
+execute as standalone services on different hosts — registered in a Redis-backed
+orchestrator and invoked over HTTP. The driver stays LangGraph-native
+(`StateGraph`, `add_edge`, `app.ainvoke`); the only new author surface is
+`@remote_node` and `serve_node()`.
+
+The 28 LangGraph node capabilities catalogued in `Features.md` are the binding
+scope: every behavior that works in a single-process LangGraph node must work
+end-to-end when that node runs remotely. See `Features.md` for the
+effort-ordered roadmap and `SPRINTS.md` for the active sprint plan.
+
+Non-goals (explicitly out of scope):
+- Replacing or forking LangGraph itself. The driver always uses upstream
+  LangGraph; we extend, never substitute.
+- LLM/tool **enforcement** (token budgets, allowlists, PII filtering). We
+  match LangGraph's stock observability story; enforcement, if needed later,
+  is a separate platform feature.
+- Multi-tenant access control, billing, UI dashboards. Out of scope unless
+  added explicitly to a sprint plan.
+
+---
+
 ## 10. Environment
 
 - **Python venv:** `/home/ubuntu/venv/`. Always use `/home/ubuntu/venv/bin/python`

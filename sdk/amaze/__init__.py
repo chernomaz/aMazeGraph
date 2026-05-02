@@ -7,6 +7,7 @@ from .langgraph import (
     InvalidStatePatch,
     OrchestratorUnavailable,
 )
+from ._messages import serialize_messages, deserialize_messages
 
 __all__ = [
     "AmazeGraph",
@@ -16,4 +17,6 @@ __all__ = [
     "RemoteNodeInvokeError",
     "InvalidStatePatch",
     "OrchestratorUnavailable",
+    "serialize_messages",
+    "deserialize_messages",
 ]

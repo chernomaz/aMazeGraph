@@ -16,6 +16,15 @@ ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8011")
 JAEGER_URL = os.environ.get("JAEGER_URL", "http://localhost:16696")
 RESEARCH_HEALTH_URL = os.environ.get("RESEARCH_HEALTH_URL", "http://localhost:9012/healthz")
 WRITER_HEALTH_URL = os.environ.get("WRITER_HEALTH_URL", "http://localhost:9013/healthz")
+# Sprint 2 services — NOTE: these four services do NOT publish host ports in
+# compose.remote-langgraph.yml, so the defaults below only work if the ports
+# are explicitly published (e.g. in a dev override file).  They are kept here
+# for manual debugging convenience; do not use them in automated assertions
+# without first confirming the ports are published.
+LLM_TOOL_HEALTH_URL = os.environ.get("LLM_TOOL_HEALTH_URL", "http://localhost:9004/healthz")
+AUDIT_HEALTH_URL = os.environ.get("AUDIT_HEALTH_URL", "http://localhost:9005/healthz")
+RESEARCH_A_HEALTH_URL = os.environ.get("RESEARCH_A_HEALTH_URL", "http://localhost:9006/healthz")
+RESEARCH_B_HEALTH_URL = os.environ.get("RESEARCH_B_HEALTH_URL", "http://localhost:9007/healthz")
 
 
 def _compose(*args: str, capture: bool = True, check: bool = False, timeout: int = 600) -> subprocess.CompletedProcess:
@@ -54,7 +63,9 @@ def compose_stack():
         "up",
         "-d",
         "--build",
-        "jaeger",
+        # NOTE: "jaeger" was removed — Jaeger is now embedded inside the
+        # orchestrator container (post-S1 polish). Starting it separately
+        # would fail with "no such service: jaeger".
         "orchestrator",
         "a2a-research",
         "a2a-writer",
@@ -124,6 +135,22 @@ def temporarily_unregister_node():
             )
         except Exception:
             pass
+
+
+@pytest.fixture(scope="session")
+def sprint2_demo(compose_stack) -> subprocess.CompletedProcess:
+    """Run the Sprint-2 all-scenario demo once; shared across ST-RLG-7..13.
+
+    All seven scenarios (S1-S6) execute in a single container run so each
+    test can query the orchestrator using the fixed run IDs: run-s1..run-s6.
+    """
+    cmd = [
+        "docker", "compose",
+        "-p", PROJECT,
+        "-f", str(COMPOSE_FILE),
+        "run", "--rm", "main-langgraph",
+    ]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
 
 @pytest.fixture

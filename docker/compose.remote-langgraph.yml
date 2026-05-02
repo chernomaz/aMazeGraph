@@ -68,6 +68,121 @@ services:
       timeout: 3s
       retries: 30
 
+  mcp:
+    # Vendored from /home/ubuntu/data/cloude/newAmazeControlPlane/aMaze/examples/mcp_server/
+    # FastMCP streamable-http server; auto-discovers @tool functions in tools/*.py.
+    build:
+      context: ..
+      dockerfile: examples/mcp_server/Dockerfile
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8000"
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+    healthcheck:
+      # FastMCP streamable-http only answers POST on /; TCP-connect probe is sufficient.
+      test: ["CMD", "python", "-c", "import socket; s=socket.socket(); s.settimeout(2); s.connect(('localhost',8000)); s.close()"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Sprint 2 nodes ──────────────────────────────────────────────────────────
+
+  a2a-llm-tool:
+    # ST-RLG-9: real OpenAI ChatOpenAI + MCP web_search
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.a2a-node
+      args:
+        NODE_MODULE: examples.a2a_nodes.llm_tool_node
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      A2A_NODE_HOST: 0.0.0.0
+      A2A_NODE_PORT: "9004"
+      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-llm-tool:9004/invoke
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      MCP_URL: http://mcp:8000/mcp
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+      mcp:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9004/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  a2a-audit:
+    # ST-RLG-10, ST-RLG-12: audit no-op + config_echo handlers (single container)
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.a2a-node
+      args:
+        NODE_MODULE: examples.a2a_nodes.audit_node
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      A2A_NODE_HOST: 0.0.0.0
+      A2A_NODE_PORT: "9005"
+      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-audit:9005/invoke
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9005/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  a2a-research-a:
+    # ST-RLG-13: parallel fan-out branch A
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.a2a-node
+      args:
+        NODE_MODULE: examples.a2a_nodes.research_a_node
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      A2A_NODE_HOST: 0.0.0.0
+      A2A_NODE_PORT: "9006"
+      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-research-a:9006/invoke
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9006/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  a2a-research-b:
+    # ST-RLG-13: parallel fan-out branch B
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.a2a-node
+      args:
+        NODE_MODULE: examples.a2a_nodes.research_b_node
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      A2A_NODE_HOST: 0.0.0.0
+      A2A_NODE_PORT: "9007"
+      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-research-b:9007/invoke
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9007/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   main-langgraph:
     build:
       context: ..
@@ -76,11 +191,26 @@ services:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      # Sprint 2: passed through for the demo's optional LangSmith tracing
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
     depends_on:
       orchestrator:
         condition: service_healthy
       a2a-research:
         condition: service_healthy
       a2a-writer:
+        condition: service_healthy
+      mcp:
+        condition: service_healthy
+      a2a-llm-tool:
+        condition: service_healthy
+      a2a-audit:
+        condition: service_healthy
+      a2a-research-a:
+        condition: service_healthy
+      a2a-research-b:
         condition: service_healthy
     restart: "no"

@@ -108,7 +108,7 @@ class OrchestratorClient:
         client = self._get_client()
         try:
             r = await client.get(f"/resolve/node/{graph_id}/{node_name}")
-        except httpx.ConnectError as exc:
+        except httpx.TransportError as exc:
             raise OrchestratorUnavailable(
                 f"cannot reach orchestrator at {self.base_url}: {exc}"
             ) from exc
@@ -187,7 +187,14 @@ class AmazeGraph:
         path_map: Any = None,
         then: Any = None,
     ) -> "AmazeGraph":
-        self.graph.add_conditional_edges(source, path, path_map, then)
+        # LangGraph 1.x dropped the `then` positional parameter; call with only
+        # the args that exist to avoid "takes from 3 to 4 positional arguments".
+        if then is not None:
+            self.graph.add_conditional_edges(source, path, path_map, then)
+        elif path_map is not None:
+            self.graph.add_conditional_edges(source, path, path_map)
+        else:
+            self.graph.add_conditional_edges(source, path)
         return self
 
     def set_entry_point(self, node: str) -> "AmazeGraph":
@@ -247,16 +254,45 @@ class AmazeGraph:
             state: dict,
             config: RunnableConfig | None = None,
         ) -> dict:
-            cfg: dict = dict(config) if isinstance(config, dict) else {}
+            # LangGraph 1.x injects config via a ContextVar regardless of whether
+            # parameter injection works for closures.  Prefer the ContextVar value
+            # so we always get the full config (thread_id, tags, metadata, etc.).
+            try:
+                from langgraph.config import get_config as _lg_get_config
+                _ctx_cfg = _lg_get_config()
+                cfg: dict = dict(_ctx_cfg) if _ctx_cfg else (dict(config) if isinstance(config, dict) else {})
+            except (ImportError, RuntimeError):
+                cfg: dict = dict(config) if isinstance(config, dict) else {}
             metadata = cfg.get("metadata") or {}
 
             run_id = (state.get("run_id") if isinstance(state, dict) else None) or metadata.get("run_id")
             trace_id = (state.get("trace_id") if isinstance(state, dict) else None) or metadata.get("trace_id")
 
+            # §9.3 runtime_context: extracted BEFORE cleaning configurable so
+            # the __amaze_runtime_context__ value is always accessible even if
+            # the broader configurable dict contains non-serializable entries.
+            raw_configurable = cfg.get("configurable") or {}
+            runtime_context = raw_configurable.get("__amaze_runtime_context__") or {}
+            if not isinstance(runtime_context, dict):
+                runtime_context = {}
+
+            # Strip LangGraph-internal configurable keys (__pregel_*, checkpoint_*)
+            # that are not JSON-serializable and must not cross process boundaries.
+            _skip_prefixes = ("__pregel_", "checkpoint_")
+            clean_configurable: dict[str, Any] = {}
+            for _k, _v in raw_configurable.items():
+                if any(_k.startswith(_p) for _p in _skip_prefixes):
+                    continue
+                try:
+                    json.dumps(_v)
+                    clean_configurable[_k] = _v
+                except (TypeError, ValueError):
+                    pass  # drop non-serializable values silently
+
             config_subset_raw = {
                 "tags": cfg.get("tags"),
                 "metadata": cfg.get("metadata"),
-                "configurable": cfg.get("configurable"),
+                "configurable": clean_configurable if clean_configurable else None,
                 "run_name": cfg.get("run_name"),
                 "recursion_limit": cfg.get("recursion_limit"),
             }
@@ -302,6 +338,7 @@ class AmazeGraph:
                     "trace_id": trace_id,
                     "state": state,
                     "config": config_subset,
+                    "runtime_context": runtime_context,
                 }
 
                 client = self._get_http_client()
