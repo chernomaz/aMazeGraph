@@ -392,3 +392,39 @@ def test_st_rlg_13_parallel_fan_out(
         f"Expected all enters before any exit (true parallel execution). "
         f"Event sequence: {[(e.get('event'), e.get('node_name')) for e in all_events]}"
     )
+
+
+# ── ST-RLG-14: mixed local + remote reducer ───────────────────────────────────
+
+
+def test_st_rlg_14_mixed_local_remote_reducer(
+    sprint2_demo: subprocess.CompletedProcess,
+    orchestrator_url: str,
+) -> None:
+    """S7: s7_local (local) appends to log_trail, then research (remote) also
+    appends to log_trail via operator.add. Verifies the reducer merges across
+    the local/remote boundary — neither entry overwrites the other.
+    """
+    _require_node(orchestrator_url, "research")
+
+    out = sprint2_demo.stdout + sprint2_demo.stderr
+    assert "S7 log_trail:" in out, f"S7 log_trail line missing from output:\n{out[-3000:]}"
+
+    log_trail_line = next(
+        (line for line in out.splitlines() if "S7 log_trail:" in line), ""
+    )
+    assert "s7_local_node" in log_trail_line, (
+        f"local node entry missing from log_trail: {log_trail_line}"
+    )
+    assert "research_node" in log_trail_line, (
+        f"remote node entry missing from log_trail: {log_trail_line}"
+    )
+
+    # Orchestrator: research node fired and completed in run-s7
+    run = _get_run(orchestrator_url, "run-s7")
+    assert _events_for(run, "node-enter", "research"), "no research node-enter in run-s7"
+    assert _events_for(run, "node-exit", "research"), "no research node-exit in run-s7"
+    run_end = _events_for(run, "run-end")
+    assert run_end and run_end[-1].get("status") == "done", (
+        f"run-s7 did not end with status=done: {run_end}"
+    )

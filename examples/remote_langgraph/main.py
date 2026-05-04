@@ -94,6 +94,13 @@ async def router_node(state: GraphState) -> dict:
     return {}
 
 
+async def s7_local_node(state: GraphState) -> dict:
+    """Local node for S7: appends to log_trail before the remote node does."""
+    msg = "s7_local_node: starting mixed-reducer scenario"
+    logger.info(msg)
+    return {"log_trail": [msg], "user_request": state.get("user_request", "")}
+
+
 def route_by_mode(state: GraphState) -> str:
     """Conditional routing: mode='research' → research node; else → writer."""
     return "research" if state.get("mode") == "research" else "writer"
@@ -398,6 +405,34 @@ async def scenario_s6_fan_out() -> dict:
     return result
 
 
+# ── Scenario S7: Mixed local + remote reducer ─────────────────────────────────
+
+
+async def scenario_s7_mixed_reducer() -> dict:
+    """s7_local (local) → research (remote).
+
+    Both nodes append a delta to log_trail via operator.add. Proves that the
+    reducer works correctly across the local/remote boundary — neither entry
+    overwrites the other.
+    """
+    logger.info("═══ S7: mixed local+remote reducer ═══")
+    wf = _make_workflow()
+    wf.add_node("s7_local", s7_local_node)
+    wf.remote_node("research")
+    wf.set_entry_point("s7_local")
+    wf.add_edge("s7_local", "research")
+    wf.add_edge("research", END)
+
+    result = await _invoke(
+        wf,
+        {"user_request": "mixed reducer test"},
+        run_id="run-s7",
+        trace_id="trace-s7",
+    )
+    logger.info("S7 log_trail: %s", result.get("log_trail"))
+    return result
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
@@ -405,7 +440,7 @@ async def main_async() -> int:
     tracer = trace.get_tracer("main-langgraph")
 
     with tracer.start_as_current_span("main-langgraph.sprint2-demo") as span:
-        span.set_attribute("amaze.scenarios", "S1,S2,S3,S4a,S4b,S5,S6")
+        span.set_attribute("amaze.scenarios", "S1,S2,S3,S4a,S4b,S5,S6,S7")
 
         outcomes: dict[str, str] = {}
 
@@ -485,6 +520,20 @@ async def main_async() -> int:
         except Exception as exc:
             logger.error("S6 failed: %s", exc)
             outcomes["S6"] = f"FAILED: {exc}"
+
+        # S7 — mixed local + remote reducer
+        try:
+            r = await scenario_s7_mixed_reducer()
+            trail = r.get("log_trail") or []
+            has_local = any("s7_local_node" in e for e in trail)
+            has_remote = any("research_node" in e for e in trail)
+            outcomes["S7"] = "ok" if (has_local and has_remote) else f"INCOMPLETE log_trail={trail}"
+        except RemoteNodeNotRegistered:
+            outcomes["S7"] = "SKIP: research node not running"
+            logger.warning("S7: research node not registered — is a2a-research running?")
+        except Exception as exc:
+            logger.error("S7 failed: %s", exc)
+            outcomes["S7"] = f"FAILED: {exc}"
 
         # Summary
         logger.info("═══ Sprint 2 demo summary ═══")

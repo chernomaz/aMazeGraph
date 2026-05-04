@@ -12,7 +12,10 @@ async def research_handler(state: dict, config: dict) -> dict:
         f"Research summary for: {user_request[:120]}. "
         "Remote LangGraph executes node bodies on separate hosts via the orchestrator."
     )
-    return {"research_result": text}
+    return {
+        "research_result": text,
+        "log_trail": [f"research_node: produced {len(text)} chars"],
+    }
 
 
 if __name__ == "__main__":

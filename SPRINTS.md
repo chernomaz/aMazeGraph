@@ -172,6 +172,7 @@ code, (2) Redis Stream entries via XRANGE, (3) Jaeger trace via HTTP API.
 | ST-RLG-11 | 11 | Conditional router picks remote A or remote B based on `state["mode"]`; run both modes | Each run hits exactly one remote; XRANGE shows correct one fired |
 | ST-RLG-12 | 26 | Audit-only remote returns `{}` | State equal pre/post except for audit's `log_trail` line |
 | ST-RLG-13 | 12 + 3 | **Real parallel fan-out.** `planner → [research_a (remote), research_b (remote)] → joiner`. Both branches return into `Annotated[list, operator.add]`. | Final `state["results"]` set-equal to `{"from_a","from_b"}`; two `node-enter` events with **overlapping wall-clock timestamps**; two distinct child spans under planner span; httpx pool ≥ 2 |
+| ST-RLG-14 | 3 | **Mixed local+remote reducer.** S7: `s7_local (local) → research (remote)`. Both append to `log_trail` via `operator.add`. | Final `log_trail` contains entries from both nodes; neither overwrites the other. |
 
 ### Definition of Done
 
