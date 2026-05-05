@@ -12,6 +12,9 @@ opentelemetry-instrumentation-httpx>=0.46b0
 pytest>=8.0
 pytest-asyncio>=0.23
 
+# Sprint 6: checkpointer
+langgraph-checkpoint-redis>=0.4.1
+
 # Sprint 2: real LLM + real MCP
 # Pinned to exact versions that resolve cleanly (from working venv 2026-05-01).
 langchain-core==1.2.28

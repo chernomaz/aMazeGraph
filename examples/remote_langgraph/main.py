@@ -27,7 +27,7 @@ from langgraph.graph import END
 from langgraph.graph.message import add_messages
 from opentelemetry import trace
 
-from examples.a2a_nodes._common import setup_logging
+from sdk.amaze import setup_logging
 from sdk.amaze import (
     AmazeGraph,
     InvalidCommand,
@@ -72,6 +72,9 @@ class GraphState(TypedDict, total=False):
     send_results: Annotated[list[str], operator.add]  # fan-out accumulator
     status: str                     # set by Command.update in with_update mode
     input: str                      # payload field forwarded to Send.arg
+    # Sprint 6: thread persistence via checkpointing (S18)
+    visits: int                     # incremented by accumulator on each turn
+    log: Annotated[list[str], operator.add]  # appended per turn by accumulator
 
 
 # Sprint 3 — Schema split state schemas (case #28, ST-RLG-18)
@@ -849,14 +852,91 @@ async def scenario_s17_bare_send() -> dict:
     return result
 
 
+# ── Scenario S18: Thread persistence via checkpointing ───────────────────────
+
+
+async def start_s18_node(state: GraphState) -> dict:
+    """Local entry node for S18 — passes state through unchanged."""
+    logger.info("start_s18_node: forwarding to accumulator")
+    return {}
+
+
+async def scenario_s18_checkpointer(checkpointer) -> dict:
+    """start_s18 (local) → accumulator (remote), called twice on the same thread.
+
+    Demonstrates thread persistence: on the second ainvoke() the accumulator
+    reads the persisted visits counter and appended log from the first turn.
+    """
+    logger.info("═══ S18: thread persistence via checkpointing ═══")
+
+    wf = AmazeGraph(GraphState, graph_id=GRAPH_ID, checkpointer=checkpointer)
+    wf.add_node("start_s18", start_s18_node)
+    wf.remote_node("accumulator")
+    wf.set_entry_point("start_s18")
+    wf.add_edge("start_s18", "accumulator")
+    wf.add_edge("accumulator", END)
+
+    app = wf.compile()
+
+    cfg: RunnableConfig = {"configurable": {"thread_id": "s18-thread"}}
+
+    await wf.orchestrator.emit_event(
+        "run-s18",
+        {
+            "event": "run-start",
+            "graph_id": GRAPH_ID,
+            "node_name": None,
+            "trace_id": "trace-s18",
+            "status": "running",
+            "error": None,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+    result1 = await app.ainvoke(
+        {"run_id": "run-s18", "trace_id": "trace-s18", "input": "run-1"},
+        config=cfg,
+    )
+    logger.info("S18 run-1: visits=%s log=%s", result1.get("visits"), result1.get("log"))
+
+    result2 = await app.ainvoke(
+        {"run_id": "run-s18", "trace_id": "trace-s18", "input": "run-2"},
+        config=cfg,
+    )
+    logger.info("S18 run-2: visits=%s log=%s", result2.get("visits"), result2.get("log"))
+
+    assert result1.get("visits") == 1, f"S18 run-1 visits expected 1, got {result1.get('visits')}"
+    assert result2.get("visits") == 2, f"S18 run-2 visits expected 2, got {result2.get('visits')}"
+    assert result2.get("log", []) == ["run-1", "run-2"], (
+        f"S18 run-2 log expected ['run-1','run-2'], got {result2.get('log')}"
+    )
+
+    await wf.orchestrator.emit_event(
+        "run-s18",
+        {
+            "event": "run-end",
+            "graph_id": GRAPH_ID,
+            "node_name": None,
+            "trace_id": "trace-s18",
+            "status": "done",
+            "error": None,
+            "ts": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+
+    logger.info("S18 visits=%s log=%s", result2["visits"], result2.get("log"))
+    await wf.aclose()
+    return result2
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
 async def main_async() -> int:
     tracer = trace.get_tracer("main-langgraph")
 
-    with tracer.start_as_current_span("main-langgraph.sprint5-demo") as span:
-        span.set_attribute("amaze.scenarios", "S1,S2,S3,S4a,S4b,S5,S6,S7,S8,S9,S10,S11,S11b,S12,S13,S14,S15,S16,S17")
+    with tracer.start_as_current_span("main-langgraph.sprint6-demo") as span:
+        span.set_attribute("amaze.scenarios", "S1,S2,S3,S4a,S4b,S5,S6,S7,S8,S9,S10,S11,S11b,S12,S13,S14,S15,S16,S17,S18")
 
         outcomes: dict[str, str] = {}
 
@@ -1088,8 +1168,29 @@ async def main_async() -> int:
             logger.error("S17 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S17"] = f"FAILED: {type(exc).__name__}: {exc}"
 
+        # S18 — thread persistence via checkpointing (Sprint 6)
+        try:
+            from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+
+            redis_url = os.environ.get("AMAZE_REDIS_URL", "redis://localhost:6380")
+            checkpointer = AsyncRedisSaver(redis_url=redis_url)
+            await checkpointer.asetup()
+            r = await scenario_s18_checkpointer(checkpointer)
+            visits = r.get("visits")
+            log = r.get("log", [])
+            outcomes["S18"] = (
+                "ok" if (visits == 2 and log == ["run-1", "run-2"])
+                else f"UNEXPECTED visits={visits} log={log}"
+            )
+        except RemoteNodeNotRegistered:
+            outcomes["S18"] = "SKIP: accumulator node not running"
+            logger.warning("S18: accumulator node not registered — is a2a-accumulator running?")
+        except Exception as exc:
+            logger.error("S18 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S18"] = f"FAILED: {type(exc).__name__}: {exc}"
+
         # Summary
-        logger.info("═══ Sprint 5 demo summary ═══")
+        logger.info("═══ Sprint 6 demo summary ═══")
         all_ok = True
         for scenario, status in outcomes.items():
             prefix = "✓" if status.startswith("ok") else ("⚠" if status.startswith("SKIP") else "✗")

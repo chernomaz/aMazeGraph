@@ -5,7 +5,7 @@ from typing import TypedDict
 
 from langgraph.graph import END, StateGraph
 
-from examples.a2a_nodes._common import remote_node, serve_node
+from sdk.amaze import remote_node, serve_node
 
 logger = logging.getLogger(__name__)
 

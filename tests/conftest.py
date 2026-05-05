@@ -16,6 +16,7 @@ ORCHESTRATOR_URL = os.environ.get("ORCHESTRATOR_URL", "http://localhost:8011")
 JAEGER_URL = os.environ.get("JAEGER_URL", "http://localhost:16696")
 RESEARCH_HEALTH_URL = os.environ.get("RESEARCH_HEALTH_URL", "http://localhost:9012/healthz")
 WRITER_HEALTH_URL = os.environ.get("WRITER_HEALTH_URL", "http://localhost:9013/healthz")
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6380")
 # Sprint 2 services — NOTE: these four services do NOT publish host ports in
 # compose.remote-langgraph.yml, so the defaults below only work if the ports
 # are explicitly published (e.g. in a dev override file).  They are kept here
@@ -274,6 +275,46 @@ def sprint5_stack(compose_stack) -> None:
 @pytest.fixture(scope="session")
 def sprint5_demo(sprint5_stack) -> subprocess.CompletedProcess:
     """Run the full Sprint 5 demo once; shared across Sprint 5 system tests."""
+    cmd = [
+        "docker", "compose",
+        "-p", PROJECT,
+        "-f", str(COMPOSE_FILE),
+        "run", "--rm", "main-langgraph",
+    ]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+
+@pytest.fixture(scope="session")
+def sprint6_stack(compose_stack) -> None:
+    """Extend compose_stack with the Sprint 6 a2a-accumulator service and wait for it to register."""
+    if os.environ.get("AMAZEGRAPH_SKIP_COMPOSE") == "1":
+        return
+    _compose(
+        "up", "-d", "--build",
+        "--profile", "sprint6",
+        "a2a-accumulator",
+        check=True,
+        timeout=900,
+    )
+    deadline = time.time() + 120.0
+    while time.time() < deadline:
+        try:
+            r = httpx.get(
+                f"{ORCHESTRATOR_URL}/resolve/node/demo_graph_v1/accumulator",
+                timeout=2.0,
+            )
+            if r.status_code == 200:
+                break
+        except Exception:
+            pass
+        time.sleep(1.0)
+    else:
+        raise RuntimeError("S6 node 'accumulator' did not register within 120s")
+
+
+@pytest.fixture(scope="session")
+def sprint6_demo(sprint6_stack) -> subprocess.CompletedProcess:
+    """Run the full Sprint 6 demo once; shared across Sprint 6 system tests."""
     cmd = [
         "docker", "compose",
         "-p", PROJECT,

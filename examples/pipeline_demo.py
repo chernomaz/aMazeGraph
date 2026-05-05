@@ -51,7 +51,7 @@ from typing import Annotated, TypedDict
 from langgraph.graph import END
 from langgraph.types import Command, Send
 
-from examples.a2a_nodes._common import setup_logging
+from sdk.amaze import setup_logging
 from sdk.amaze import AmazeGraph, InvalidCommand, InvalidStatePatch, RemoteNodeInvokeError
 
 logger = logging.getLogger(__name__)

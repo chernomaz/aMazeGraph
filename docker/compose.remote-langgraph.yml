@@ -14,6 +14,7 @@ services:
     ports:
       - "8011:8001"
       - "16696:16686"
+      - "6380:6379"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:8001/health',timeout=2); sys.exit(0 if r.status==200 else 1)"]
       interval: 2s
@@ -231,6 +232,31 @@ services:
       timeout: 3s
       retries: 30
 
+  # Sprint 6 nodes ──────────────────────────────────────────────────────────
+
+  a2a-accumulator:
+    profiles: [sprint6]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.a2a-node
+      args:
+        NODE_MODULE: examples.a2a_nodes.accumulator_node
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      A2A_NODE_HOST: 0.0.0.0
+      A2A_NODE_PORT: "9015"
+      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-accumulator:9015/invoke
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9015/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   # Sprint 4 nodes ──────────────────────────────────────────────────────────
 
   a2a-command:
@@ -371,6 +397,8 @@ services:
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
+      # Sprint 6: checkpointer Redis URL (embedded Redis inside orchestrator container)
+      AMAZE_REDIS_URL: redis://orchestrator:6379
     depends_on:
       orchestrator:
         condition: service_healthy

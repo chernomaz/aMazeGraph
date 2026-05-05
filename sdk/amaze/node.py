@@ -171,8 +171,6 @@ def _handler_accepts_runtime(handler: NodeHandler) -> bool:
             inspect.Parameter.KEYWORD_ONLY,
         )
     ]
-    if len(params) >= 3:
-        return True
     for p in params:
         if p.name == "runtime":
             return True

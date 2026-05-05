@@ -724,3 +724,101 @@ identical to the static-edge fan-out constraint.
 None. The orchestrator does not inspect `command` or validate `goto` targets.
 All routing validation is local to the proxy process, which has full knowledge
 of the compiled graph's node set.
+
+---
+
+## 12. Sprint 6 addendum — Checkpointer (case 23)
+
+Sprint 6 wires a LangGraph checkpointer into `AmazeGraph`, enabling persistent
+graph state across multiple `ainvoke()` calls on the same thread. No wire-format
+changes. No orchestrator changes.
+
+### 12.1 `AmazeGraph(checkpointer=...)` parameter
+
+`AmazeGraph.__init__` gains an optional `checkpointer` keyword argument:
+
+```python
+from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+from sdk.amaze.langgraph import AmazeGraph
+
+checkpointer = AsyncRedisSaver(redis_url="redis://orchestrator:6379")
+await checkpointer.asetup()   # creates Redis key structures on first use
+
+wf = AmazeGraph(GraphState, graph_id="demo_graph_v1", checkpointer=checkpointer)
+app = wf.compile()   # checkpointer passed to StateGraph.compile()
+```
+
+Rules:
+- Defaults to `None` — fully backward-compatible. All Sprint 1–5 code is
+  unaffected.
+- Any `BaseCheckpointSaver` implementation is accepted. Sprint 6 uses
+  `AsyncRedisSaver` from `langgraph-checkpoint-redis`; `MemorySaver` is a
+  valid substitute for unit testing.
+- If the caller also passes `checkpointer=` to `compile()`, the explicit kwarg
+  wins (the stored value is set via `setdefault`, not forced).
+
+### 12.2 Thread persistence semantics
+
+When a `checkpointer` is configured and the caller supplies a `thread_id` in
+the config, LangGraph saves a checkpoint after every superstep. On the next
+`ainvoke()` with the same `thread_id`, the graph resumes from the last
+checkpoint:
+
+```python
+cfg = {"configurable": {"thread_id": "my-session"}}
+
+result1 = await app.ainvoke({"input": "turn-1"}, config=cfg)
+# checkpoint saved with full state after turn-1
+
+result2 = await app.ainvoke({"input": "turn-2"}, config=cfg)
+# graph starts from checkpoint; state from turn-1 is visible to all nodes
+```
+
+State fields declared with reducers (§9.1) accumulate across turns. Plain
+fields use last-write-wins (the most recent turn's value is visible).
+
+### 12.3 Remote nodes and thread persistence
+
+Remote nodes receive the **full current channel state** on every invocation
+(§3.1 — unchanged). When a checkpointer is configured, the state passed to a
+remote node on turn N already incorporates all writes from turns 1..N-1.
+Remote nodes do not need to be checkpointer-aware; they read and write state
+normally.
+
+### 12.4 Redis connection
+
+The embedded Redis inside the orchestrator container now binds to `0.0.0.0`
+(changed from `127.0.0.1` in Sprint 6). Host port `6380` is published:
+`orchestrator_container:6379 → host:6380`.
+
+| Context | Redis URL |
+|---|---|
+| Inside Docker Compose network | `redis://orchestrator:6379` |
+| From host machine / tests | `redis://localhost:6380` |
+
+The `main-langgraph` container receives `AMAZE_REDIS_URL=redis://orchestrator:6379`
+via the compose environment. Host-side scripts use `redis://localhost:6380`.
+
+### 12.5 `interrupt()` and human-in-the-loop (cases 17 + 18)
+
+With a checkpointer configured, `interrupt()` works natively for **local**
+nodes. The recommended pattern for human-in-the-loop with remote nodes is:
+
+```
+local_gate (calls interrupt()) → remote_processor (reads answer from state)
+```
+
+1. `local_gate` calls `interrupt(question)` — graph pauses, state checkpointed.
+2. Human answers; driver resumes with `app.ainvoke(Command(resume=answer))`.
+3. `local_gate` returns `{"human_answer": answer}` into state.
+4. `remote_processor` reads `state["human_answer"]` normally — no wire changes.
+
+No new wire format is required. Cases 17 + 18 are covered by this pattern once
+the checkpointer is in place.
+
+### 12.6 Orchestrator changes
+
+None. The checkpointer writes to the same embedded Redis instance that the
+orchestrator uses, but under different key prefixes (`checkpoint:*`,
+`checkpoint_write:*`) that do not collide with orchestrator keys
+(`graph_node:*`, `graph:*`, `run:*`).

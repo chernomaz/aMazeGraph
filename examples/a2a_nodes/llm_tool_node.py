@@ -4,7 +4,7 @@ import logging
 import os
 from typing import Any
 
-from examples.a2a_nodes._common import remote_node, serve_node
+from sdk.amaze import remote_node, serve_node
 
 try:
     from langchain_openai import ChatOpenAI

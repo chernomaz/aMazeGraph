@@ -20,7 +20,7 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END
 from langgraph.graph.message import add_messages
 
-from examples.a2a_nodes._common import setup_logging
+from sdk.amaze import setup_logging
 from sdk.amaze import AmazeGraph, OrchestratorUnavailable, RemoteNodeInvokeError, RemoteNodeNotRegistered
 
 logger = logging.getLogger(__name__)

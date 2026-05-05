@@ -4,7 +4,7 @@ import logging
 
 from langgraph.types import Command, Send
 
-from examples.a2a_nodes._common import remote_node, serve_node, setup_logging
+from sdk.amaze import remote_node, serve_node, setup_logging
 
 GRAPH_ID = "demo_graph_v1"
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from examples.a2a_nodes._common import remote_node, serve_node, setup_logging
+from sdk.amaze import remote_node, serve_node, setup_logging
 
 GRAPH_ID = "demo_graph_v1"
 

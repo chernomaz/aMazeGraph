@@ -182,9 +182,11 @@ class AmazeGraph:
         *,
         graph_id: str,
         orchestrator_url: str | None = None,
+        checkpointer: Any = None,
         **langgraph_kwargs: Any,
     ) -> None:
         self.graph_id = graph_id
+        self._checkpointer = checkpointer
         self.graph = StateGraph(state_schema, **langgraph_kwargs)
         url = orchestrator_url or os.environ.get("AMAZE_ORCHESTRATOR_URL")
         if not url:
@@ -257,6 +259,8 @@ class AmazeGraph:
             raise OrchestratorUnavailable(
                 f"register_graph failed: status={r.status_code} body={r.text[:512]}"
             )
+        if self._checkpointer is not None:
+            kwargs.setdefault("checkpointer", self._checkpointer)
         return self.graph.compile(*args, **kwargs)
 
     def _get_http_client(self) -> httpx.AsyncClient:

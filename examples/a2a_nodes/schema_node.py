@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from examples.a2a_nodes._common import remote_node, serve_node
+from sdk.amaze import remote_node, serve_node
 
 logger = logging.getLogger(__name__)
 
