@@ -10,6 +10,8 @@ from typing import Any, Awaitable, Callable
 import httpx
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
+from langgraph.types import Command as LGCommand
+from langgraph.types import Send as LGSend
 from opentelemetry import trace
 
 logger = logging.getLogger(__name__)
@@ -489,9 +491,19 @@ class AmazeGraph:
                         )
 
                     if isinstance(goto_raw, str):
-                        goto_targets: list[str] = [goto_raw]
+                        reconstructed = [goto_raw]
+                        scalar = True
+                    elif isinstance(goto_raw, dict) and goto_raw.get("__send__"):
+                        reconstructed = [LGSend(goto_raw["node"], goto_raw["arg"])]
+                        scalar = False
                     elif isinstance(goto_raw, list):
-                        goto_targets = goto_raw
+                        reconstructed = [
+                            LGSend(item["node"], item["arg"])
+                            if isinstance(item, dict) and item.get("__send__")
+                            else item
+                            for item in goto_raw
+                        ]
+                        scalar = False
                     else:
                         if run_id:
                             await self.orchestrator.emit_event(
@@ -509,21 +521,22 @@ class AmazeGraph:
                         )
 
                     known = set(self._nodes) | {"__end__"}
-                    for target in goto_targets:
-                        if target not in known:
+                    for item in reconstructed:
+                        target_name = item.node if isinstance(item, LGSend) else item
+                        if target_name not in known:
                             if run_id:
                                 await self.orchestrator.emit_event(
                                     run_id,
                                     self._make_event(
                                         "node-error", node_name, trace_id,
                                         status="error",
-                                        error=f"unknown-goto-target:{target}",
+                                        error=f"unknown-goto-target:{target_name}",
                                         error_kind="proxy_block",
                                     ),
                                 )
                             raise InvalidCommand(
                                 self.graph_id, node_name,
-                                f"command.goto target {target!r} not in graph"
+                                f"command.goto target {target_name!r} not in graph"
                             )
 
                     update_patch = command_raw.get("update") or {}
@@ -551,8 +564,8 @@ class AmazeGraph:
                             ),
                         )
 
-                    from langgraph.types import Command as LGCommand
-                    return LGCommand(update=update_patch, goto=goto_raw)
+                    # Send.arg must be JSON-serializable (same contract as state_patch)
+                    return LGCommand(update=update_patch, goto=goto_raw if scalar else reconstructed)
 
                 # ── Existing state_patch path (unchanged) ───────────────────
                 state_patch = body.get("state_patch")

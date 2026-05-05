@@ -244,6 +244,45 @@ def sprint4_demo(sprint4_stack) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
 
+@pytest.fixture(scope="session")
+def sprint5_stack(compose_stack) -> None:
+    """Extend compose_stack with the Sprint 5 a2a-send service and wait for it to register."""
+    if os.environ.get("AMAZEGRAPH_SKIP_COMPOSE") == "1":
+        return
+    _compose(
+        "up", "-d", "--build",
+        "a2a-send",
+        check=True,
+        timeout=900,
+    )
+    deadline = time.time() + 120.0
+    while time.time() < deadline:
+        try:
+            r = httpx.get(
+                f"{ORCHESTRATOR_URL}/resolve/node/demo_graph_v1/send_dispatcher",
+                timeout=2.0,
+            )
+            if r.status_code == 200:
+                break
+        except Exception:
+            pass
+        time.sleep(1.0)
+    else:
+        raise RuntimeError("S5 node 'send_dispatcher' did not register within 120s")
+
+
+@pytest.fixture(scope="session")
+def sprint5_demo(sprint5_stack) -> subprocess.CompletedProcess:
+    """Run the full Sprint 5 demo once; shared across Sprint 5 system tests."""
+    cmd = [
+        "docker", "compose",
+        "-p", PROJECT,
+        "-f", str(COMPOSE_FILE),
+        "run", "--rm", "main-langgraph",
+    ]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+
 @pytest.fixture
 def research_with_env():
     container_name = f"{PROJECT}-a2a-research-debug"

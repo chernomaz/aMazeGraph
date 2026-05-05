@@ -14,7 +14,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from langgraph.types import Command
+from langgraph.types import Command, Send
 from sdk.amaze.langgraph import _init_otel
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,14 @@ def setup_logging(service_name: str) -> None:
     access = logging.getLogger("uvicorn.access")
     if not any(isinstance(f, _HealthcheckFilter) for f in access.filters):
         access.addFilter(_HealthcheckFilter())
+
+
+def _serialize_goto(goto: Any) -> Any:
+    if isinstance(goto, Send):
+        return {"__send__": True, "node": goto.node, "arg": goto.arg}
+    if isinstance(goto, list):
+        return [_serialize_goto(item) for item in goto]
+    return goto
 
 
 class InvokeRequest(BaseModel):
@@ -267,9 +275,13 @@ def _build_handlers_app(
             return {
                 "command": {
                     "update": result.update if isinstance(result.update, dict) else {},
-                    "goto": result.goto,
+                    "goto": _serialize_goto(result.goto),
                 }
             }
+        # bare Send / list[Send] — normalize to Command(goto=[...]) with no update
+        if isinstance(result, (Send, list)):
+            goto = [result] if isinstance(result, Send) else result
+            return {"command": {"update": {}, "goto": _serialize_goto(goto)}}
         if not isinstance(result, dict):
             raise HTTPException(status_code=500, detail="handler-returned-non-dict")
         return {"state_patch": result}

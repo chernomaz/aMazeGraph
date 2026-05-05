@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import logging
+
 from examples.a2a_nodes._common import remote_node, serve_node
 
 GRAPH_ID = "demo_graph_v1"
 
+logger = logging.getLogger(__name__)
+
 
 @remote_node(graph_id=GRAPH_ID, node_name="writer")
 async def writer_handler(state: dict, config: dict) -> dict:
+    logger.info("writer received state keys=%s", list(state.keys()))
+    logger.info("writer received user_request=%r", state.get("user_request", "")[:120])
+    logger.info("writer received research_result=%r", state.get("research_result", "")[:120])
     research_result = state.get("research_result", "")
     user_request = state.get("user_request", "")
     final = (

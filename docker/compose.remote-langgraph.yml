@@ -160,6 +160,77 @@ services:
       timeout: 3s
       retries: 30
 
+  # Pipeline demo ──────────────────────────────────────────────────────────
+
+  a2a-planner:
+    profiles: [pipeline]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.a2a-node
+      args:
+        NODE_MODULE: examples.a2a_nodes.planner_node
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      A2A_NODE_HOST: 0.0.0.0
+      A2A_NODE_PORT: "9020"
+      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-planner:9020/invoke
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9020/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  pipeline-demo:
+    profiles: [pipeline]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.main
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+    command: ["python", "-m", "examples.pipeline_demo", "LangGraph remote node execution"]
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+      a2a-research:
+        condition: service_healthy
+      a2a-writer:
+        condition: service_healthy
+      a2a-planner:
+        condition: service_healthy
+    restart: "no"
+
+  # Sprint 5 nodes ──────────────────────────────────────────────────────────
+
+  a2a-send:
+    profiles: [sprint5]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.a2a-node
+      args:
+        NODE_MODULE: examples.a2a_nodes.send_node
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      A2A_NODE_HOST: 0.0.0.0
+      A2A_NODE_PORT: "9014"
+      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-send:9014/invoke
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9014/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   # Sprint 4 nodes ──────────────────────────────────────────────────────────
 
   a2a-command:

@@ -66,6 +66,12 @@ class GraphState(TypedDict, total=False):
     langgraph_step_echo: int
     # Sprint 4: Command routing (cases 14+15)
     cmd_result: str
+    # Sprint 5: Send routing (cases 13+16)
+    full_state_marker: str          # present in full state; absent from Send.arg
+    send_received: dict             # what send_sink recorded from its input
+    send_results: Annotated[list[str], operator.add]  # fan-out accumulator
+    status: str                     # set by Command.update in with_update mode
+    input: str                      # payload field forwarded to Send.arg
 
 
 # Sprint 3 — Schema split state schemas (case #28, ST-RLG-18)
@@ -168,6 +174,20 @@ async def cmd_sink_a_node(state: GraphState) -> dict:
 async def cmd_sink_b_node(state: GraphState) -> dict:
     logger.info("▶ [cmd_sink_b] entered — appending from_cmd_sink_b to results")
     return {"results": ["from_cmd_sink_b"], "log_trail": ["cmd_sink_b_node: done"]}
+
+
+async def send_sink_node(state: dict) -> dict:
+    # Records exactly which keys arrived via Send.arg
+    return {"send_received": dict(state)}
+
+
+async def send_sink_a_node_s5(state: dict) -> dict:
+    return {"send_results": [f"branch_a:{state.get('val', '')}:{state.get('branch', '')}"]}
+
+
+async def send_sink_b_node_s5(state: dict) -> dict:
+    return {"send_results": [f"branch_b:{state.get('val', '')}:{state.get('branch', '')}"]}
+
 
 
 async def cmd_joiner_node(state: GraphState) -> dict:
@@ -727,14 +747,116 @@ async def scenario_s13_bad_goto_proxy_block() -> dict:
         return {"proxy_block_verified": True}
 
 
+# ── Scenario S14: Send single (Case 13) ──────────────────────────────────────
+
+
+async def scenario_s14_send_single() -> dict:
+    """cmd_entry → send_dispatcher (remote, mode='single') → send_sink."""
+    logger.info("═══ S14: Send single ═══")
+    wf = _make_workflow()
+    wf.add_node("cmd_entry", cmd_entry_node)
+    wf.remote_node("send_dispatcher")
+    wf.add_node("send_sink", send_sink_node)
+    wf.set_entry_point("cmd_entry")
+    wf.add_edge("cmd_entry", "send_dispatcher")
+    wf.add_edge("send_sink", END)
+
+    result = await _invoke(
+        wf,
+        {"input": "hello-send", "full_state_marker": "FULL_STATE", "mode": "single"},
+        run_id="run-s14",
+        trace_id="trace-s14",
+    )
+    logger.info("S14 send_received: %s", result.get("send_received"))
+    return result
+
+
+# ── Scenario S15: Send parallel fan-out (Case 13) ────────────────────────────
+
+
+async def scenario_s15_send_parallel() -> dict:
+    """cmd_entry → send_dispatcher (remote, mode='parallel') → [send_sink_a, send_sink_b]."""
+    logger.info("═══ S15: Send parallel fan-out ═══")
+    wf = _make_workflow()
+    wf.add_node("cmd_entry", cmd_entry_node)
+    wf.remote_node("send_dispatcher")
+    wf.add_node("send_sink_a", send_sink_a_node_s5)
+    wf.add_node("send_sink_b", send_sink_b_node_s5)
+    wf.set_entry_point("cmd_entry")
+    wf.add_edge("cmd_entry", "send_dispatcher")
+    wf.add_edge("send_sink_a", END)
+    wf.add_edge("send_sink_b", END)
+
+    result = await _invoke(
+        wf,
+        {"input": "fan-out", "full_state_marker": "FULL_STATE", "mode": "parallel"},
+        run_id="run-s15",
+        trace_id="trace-s15",
+    )
+    logger.info("S15 send_results: %s", result.get("send_results"))
+    return result
+
+
+# ── Scenario S16: Command + Send (Case 16) ────────────────────────────────────
+
+
+async def scenario_s16_send_with_update() -> dict:
+    """cmd_entry → send_dispatcher (remote, mode='with_update') → send_sink."""
+    logger.info("═══ S16: Command+Send (update + Send routing) ═══")
+    wf = _make_workflow()
+    wf.add_node("cmd_entry", cmd_entry_node)
+    wf.remote_node("send_dispatcher")
+    wf.add_node("send_sink", send_sink_node)
+    wf.set_entry_point("cmd_entry")
+    wf.add_edge("cmd_entry", "send_dispatcher")
+    wf.add_edge("send_sink", END)
+
+    result = await _invoke(
+        wf,
+        {"input": "update-and-send", "full_state_marker": "FULL_STATE", "mode": "with_update"},
+        run_id="run-s16",
+        trace_id="trace-s16",
+    )
+    logger.info("S16 status: %s  send_received: %s", result.get("status"), result.get("send_received"))
+    return result
+
+
+# ── Scenario S17: bare Send (no Command wrapper) ─────────────────────────────
+
+
+async def scenario_s17_bare_send() -> dict:
+    """cmd_entry → send_dispatcher (remote, mode='bare_send') → send_sink.
+
+    Remote node returns Send(...) directly with no Command wrapper.
+    Proxy normalises it to Command(goto=[Send(...)]) on the wire.
+    """
+    logger.info("═══ S17: bare Send (no Command wrapper) ═══")
+    wf = _make_workflow()
+    wf.add_node("cmd_entry", cmd_entry_node)
+    wf.remote_node("send_dispatcher")
+    wf.add_node("send_sink", send_sink_node)
+    wf.set_entry_point("cmd_entry")
+    wf.add_edge("cmd_entry", "send_dispatcher")
+    wf.add_edge("send_sink", END)
+
+    result = await _invoke(
+        wf,
+        {"input": "bare-send-test", "full_state_marker": "FULL_STATE", "mode": "bare_send"},
+        run_id="run-s17",
+        trace_id="trace-s17",
+    )
+    logger.info("S17 send_received: %s", result.get("send_received"))
+    return result
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
 async def main_async() -> int:
     tracer = trace.get_tracer("main-langgraph")
 
-    with tracer.start_as_current_span("main-langgraph.sprint4-demo") as span:
-        span.set_attribute("amaze.scenarios", "S1,S2,S3,S4a,S4b,S5,S6,S7,S8,S9,S10,S11,S11b,S12,S13")
+    with tracer.start_as_current_span("main-langgraph.sprint5-demo") as span:
+        span.set_attribute("amaze.scenarios", "S1,S2,S3,S4a,S4b,S5,S6,S7,S8,S9,S10,S11,S11b,S12,S13,S14,S15,S16,S17")
 
         outcomes: dict[str, str] = {}
 
@@ -914,8 +1036,60 @@ async def main_async() -> int:
             logger.error("S13 failed unexpectedly [%s]: %s", type(exc).__name__, exc)
             outcomes["S13"] = f"FAILED: {type(exc).__name__}: {exc}"
 
+        # S14 — Send single (case #13)
+        try:
+            r = await scenario_s14_send_single()
+            recv = r.get("send_received") or {}
+            has_val = "val" in recv
+            no_marker = "full_state_marker" not in recv
+            outcomes["S14"] = "ok" if (has_val and no_marker) else f"UNEXPECTED send_received={recv}"
+        except RemoteNodeNotRegistered:
+            outcomes["S14"] = "SKIP: send_dispatcher not running"
+            logger.warning("S14: send_dispatcher not registered — is a2a-send running?")
+        except Exception as exc:
+            logger.error("S14 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S14"] = f"FAILED: {type(exc).__name__}: {exc}"
+
+        # S15 — Send parallel fan-out (case #13)
+        try:
+            r = await scenario_s15_send_parallel()
+            results = r.get("send_results") or []
+            has_a = any("branch_a" in x for x in results)
+            has_b = any("branch_b" in x for x in results)
+            outcomes["S15"] = "ok" if (has_a and has_b) else f"INCOMPLETE send_results={results}"
+        except RemoteNodeNotRegistered:
+            outcomes["S15"] = "SKIP: send_dispatcher not running"
+            logger.warning("S15: send_dispatcher not registered — is a2a-send running?")
+        except Exception as exc:
+            logger.error("S15 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S15"] = f"FAILED: {type(exc).__name__}: {exc}"
+
+        # S16 — Command+Send (case #16)
+        try:
+            r = await scenario_s16_send_with_update()
+            recv = r.get("send_received") or {}
+            outcomes["S16"] = "ok" if (r.get("status") == "dispatched" and "val" in recv) else f"UNEXPECTED status={r.get('status')!r} send_received={recv}"
+        except RemoteNodeNotRegistered:
+            outcomes["S16"] = "SKIP: send_dispatcher not running"
+            logger.warning("S16: send_dispatcher not registered — is a2a-send running?")
+        except Exception as exc:
+            logger.error("S16 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S16"] = f"FAILED: {type(exc).__name__}: {exc}"
+
+        # S17 — bare Send (no Command wrapper)
+        try:
+            r = await scenario_s17_bare_send()
+            recv = r.get("send_received") or {}
+            outcomes["S17"] = "ok" if "val" in recv else f"UNEXPECTED send_received={recv}"
+        except RemoteNodeNotRegistered:
+            outcomes["S17"] = "SKIP: send_dispatcher not running"
+            logger.warning("S17: send_dispatcher not registered — is a2a-send running?")
+        except Exception as exc:
+            logger.error("S17 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S17"] = f"FAILED: {type(exc).__name__}: {exc}"
+
         # Summary
-        logger.info("═══ Sprint 3 demo summary ═══")
+        logger.info("═══ Sprint 5 demo summary ═══")
         all_ok = True
         for scenario, status in outcomes.items():
             prefix = "✓" if status.startswith("ok") else ("⚠" if status.startswith("SKIP") else "✗")
