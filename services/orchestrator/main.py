@@ -146,6 +146,7 @@ class RunEventRequest(BaseModel):
     trace_id: str | None = None
     status: str | None = None
     error: str | None = None
+    error_kind: str | None = None
     ts: str
 
     @field_validator("graph_id")
@@ -350,6 +351,8 @@ async def append_run_event(
         "error": req.error or "",
         "ts": req.ts,
     }
+    if req.error_kind:
+        fields["error_kind"] = req.error_kind
     meta_key = _run_meta_key(run_id)
     events_key = _run_events_key(run_id)
     try:

@@ -14,6 +14,7 @@ import uvicorn
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
+from langgraph.types import Command
 from sdk.amaze.langgraph import _init_otel
 
 logger = logging.getLogger(__name__)
@@ -259,6 +260,16 @@ def _build_handlers_app(
             result = await handler(req.state, req.config, runtime)
         else:
             result = await handler(req.state, req.config)
+        # langgraph.types.Command return → translate to wire {"command": {...}} (Cases 14+15).
+        # isinstance check is collision-safe: plain dicts (even with a "command" key)
+        # always go through the state_patch path below.
+        if isinstance(result, Command):
+            return {
+                "command": {
+                    "update": result.update if isinstance(result.update, dict) else {},
+                    "goto": result.goto,
+                }
+            }
         if not isinstance(result, dict):
             raise HTTPException(status_code=500, detail="handler-returned-non-dict")
         return {"state_patch": result}

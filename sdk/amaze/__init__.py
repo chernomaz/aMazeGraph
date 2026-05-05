@@ -6,6 +6,7 @@ from .langgraph import (
     RemoteNodeInvokeError,
     InvalidStatePatch,
     OrchestratorUnavailable,
+    InvalidCommand,
 )
 from ._messages import serialize_messages, deserialize_messages
 
@@ -17,6 +18,7 @@ __all__ = [
     "RemoteNodeInvokeError",
     "InvalidStatePatch",
     "OrchestratorUnavailable",
+    "InvalidCommand",
     "serialize_messages",
     "deserialize_messages",
 ]

@@ -1,4 +1,4 @@
-"""Sprint 2 demo — exercises 13 Sprint-2 capability cases in a single run.
+"""Sprint 2 + Sprint 3 demo — exercises LangGraph node capabilities in a single run.
 
 Scenarios executed sequentially:
   S1  Original flow      : start → research → post_research → writer → post_writer
@@ -8,6 +8,10 @@ Scenarios executed sequentially:
   S4b Conditional B      : router → writer    (mode="write")
   S5  Audit no-op        : start → audit      (returns {})
   S6  Parallel fan-out   : planner → [research_a, research_b] → joiner
+  S7  Mixed reducer      : s7_local (local) → research (remote)
+  S8  Subgraph node      : start → subgraph (remote, internally runs 2-step StateGraph)
+  S9  Schema split       : s9_local → schema_remote; private fields absent from output
+  S10 Recursion metadata : counter (remote, loops 3×) with langgraph_step echo
 """
 
 import asyncio
@@ -26,6 +30,7 @@ from opentelemetry import trace
 from examples.a2a_nodes._common import setup_logging
 from sdk.amaze import (
     AmazeGraph,
+    InvalidCommand,
     InvalidStatePatch,
     OrchestratorUnavailable,
     RemoteNodeInvokeError,
@@ -56,6 +61,31 @@ class GraphState(TypedDict, total=False):
     echoed_tenant: str
     # LLM+tool output (ST-RLG-9)
     tool_result: str
+    # Sprint 3: recursion metadata (ST-RLG-17)
+    count: int
+    langgraph_step_echo: int
+    # Sprint 4: Command routing (cases 14+15)
+    cmd_result: str
+
+
+# Sprint 3 — Schema split state schemas (case #28, ST-RLG-18)
+
+class S9InputState(TypedDict, total=False):
+    """Fields accepted at ainvoke() call site."""
+    run_id: str
+    trace_id: str
+    user_request: str
+
+
+class S9PrivateState(S9InputState, total=False):
+    """Full internal graph state; extends InputState with private fields."""
+    private_data: str
+    log_trail: Annotated[list[str], operator.add]
+
+
+class S9OutputState(TypedDict, total=False):
+    """Fields returned by ainvoke()."""
+    final_answer: str
 
 
 # ── Shared local nodes ────────────────────────────────────────────────────────
@@ -120,6 +150,38 @@ async def joiner_node(state: GraphState) -> dict:
     return {"final_answer": combined}
 
 
+async def cmd_entry_node(state: GraphState) -> dict:
+    logger.info("▶ [cmd_entry] entered — mode=%s user_request=%s", state.get("mode"), (state.get("user_request") or "")[:40])
+    return {}
+
+
+async def cmd_sink_node(state: GraphState) -> dict:
+    logger.info("▶ [cmd_sink] entered — cmd_result=%s", state.get("cmd_result"))
+    return {"log_trail": [f"cmd_sink_node: received cmd_result={state.get('cmd_result')!r}"]}
+
+
+async def cmd_sink_a_node(state: GraphState) -> dict:
+    logger.info("▶ [cmd_sink_a] entered — appending from_cmd_sink_a to results")
+    return {"results": ["from_cmd_sink_a"], "log_trail": ["cmd_sink_a_node: done"]}
+
+
+async def cmd_sink_b_node(state: GraphState) -> dict:
+    logger.info("▶ [cmd_sink_b] entered — appending from_cmd_sink_b to results")
+    return {"results": ["from_cmd_sink_b"], "log_trail": ["cmd_sink_b_node: done"]}
+
+
+async def cmd_joiner_node(state: GraphState) -> dict:
+    results = state.get("results") or []          # from local branches (operator.add reducer)
+    writer_answer = state.get("final_answer") or ""  # from writer remote branch
+    local_part = "; ".join(results)
+    logger.info(
+        "▶ [cmd_joiner] entered — local_results=%s  writer_final_answer=%s",
+        results, writer_answer[:80],
+    )
+    merged = f"local=[{local_part}] | writer=[{writer_answer[:80]}]"
+    return {"final_answer": merged}
+
+
 # ── Scenario helpers ──────────────────────────────────────────────────────────
 
 
@@ -162,6 +224,7 @@ async def _invoke(
         RemoteNodeNotRegistered,
         RemoteNodeInvokeError,
         InvalidStatePatch,
+        InvalidCommand,
         OrchestratorUnavailable,
     ) as exc:
         await workflow.orchestrator.emit_event(
@@ -433,14 +496,245 @@ async def scenario_s7_mixed_reducer() -> dict:
     return result
 
 
+# ── Sprint 3 local nodes ──────────────────────────────────────────────────────
+
+
+async def s9_local_node(state: dict) -> dict:
+    """Populate private_data before the remote schema_remote node runs."""
+    secret = f"private:{state.get('user_request', '')[:40]}"
+    logger.info("s9_local_node: setting private_data=%r", secret)
+    return {"private_data": secret, "log_trail": ["s9_local_node: populated private_data"]}
+
+
+def s10_route(state: dict) -> str:
+    """Loop back to counter while count < 3; exit otherwise."""
+    return "counter" if (state.get("count") or 0) < 3 else "__end__"
+
+
+# ── Scenario S8: Subgraph node ────────────────────────────────────────────────
+
+
+async def scenario_s8_subgraph() -> dict:
+    """start → subgraph (remote).
+
+    The remote node internally compiles and runs a 2-step StateGraph,
+    then returns a merged state_patch. Demonstrates cases #19 + #20.
+    """
+    logger.info("═══ S8: subgraph node ═══")
+    wf = _make_workflow()
+    wf.add_node("start", start_node)
+    wf.remote_node("subgraph")
+    wf.set_entry_point("start")
+    wf.add_edge("start", "subgraph")
+    wf.add_edge("subgraph", END)
+
+    result = await _invoke(
+        wf,
+        {"user_request": "test subgraph opaque node"},
+        run_id="run-s8",
+        trace_id="trace-s8",
+    )
+    logger.info("S8 research_result: %s", (result.get("research_result") or "")[:120])
+    logger.info("S8 log_trail: %s", result.get("log_trail"))
+    return result
+
+
+# ── Scenario S9: Schema split ─────────────────────────────────────────────────
+
+
+async def scenario_s9_schema_split() -> dict:
+    """s9_local (local) → schema_remote (remote).
+
+    Demonstrates case #28: AmazeGraph compiled with input/output schema.
+    The ainvoke() result only contains OutputState fields (final_answer);
+    private_data is filtered by LangGraph's output schema.
+    """
+    logger.info("═══ S9: schema split (input/private/output) ═══")
+    wf = AmazeGraph(
+        S9PrivateState,
+        graph_id=GRAPH_ID,
+        input=S9InputState,
+        output=S9OutputState,
+    )
+    wf.add_node("s9_local", s9_local_node)
+    wf.remote_node("schema_remote")
+    wf.set_entry_point("s9_local")
+    wf.add_edge("s9_local", "schema_remote")
+    wf.add_edge("schema_remote", END)
+
+    result = await _invoke(
+        wf,
+        {"user_request": "schema split test"},
+        run_id="run-s9",
+        trace_id="trace-s9",
+    )
+    logger.info("S9 final_answer: %s", result.get("final_answer", "")[:120])
+    logger.info("S9 keys in result: %s", list(result.keys()))
+    return result
+
+
+# ── Scenario S10: Recursion / step metadata ───────────────────────────────────
+
+
+async def scenario_s10_recursion_metadata() -> dict:
+    """counter (remote) loops 3 times; each invocation echoes langgraph_step.
+
+    Demonstrates case #25: langgraph_step metadata survives the wire
+    and increments correctly across supersteps.
+    """
+    logger.info("═══ S10: recursion metadata (langgraph_step echo) ═══")
+    wf = _make_workflow()
+    wf.remote_node("counter")
+    wf.set_entry_point("counter")
+    wf.add_conditional_edges("counter", s10_route, {"counter": "counter", "__end__": END})
+
+    config: RunnableConfig = {"configurable": {"thread_id": "s10-thread"}, "recursion_limit": 25}
+    result = await _invoke(
+        wf,
+        {"user_request": "recursion step test", "count": 0},
+        run_id="run-s10",
+        trace_id="trace-s10",
+        config=config,
+    )
+    logger.info(
+        "S10 count=%s langgraph_step_echo=%s log_trail=%s",
+        result.get("count"),
+        result.get("langgraph_step_echo"),
+        result.get("log_trail"),
+    )
+    return result
+
+
+# ── Scenario S11: Command single-goto (Case 14) ───────────────────────────────
+
+
+async def scenario_s11_command_single_goto() -> dict:
+    """cmd_entry → command (remote, Command.goto='cmd_sink') → cmd_sink.
+
+    Demonstrates case #14: remote node returns AmazeCommand driving routing.
+    """
+    logger.info("═══ S11: Command single-goto ═══")
+    wf = _make_workflow()
+    wf.add_node("cmd_entry", cmd_entry_node)
+    wf.remote_node("command")
+    wf.add_node("cmd_sink", cmd_sink_node)
+    wf.set_entry_point("cmd_entry")
+    wf.add_edge("cmd_entry", "command")
+    # No static edge from command → cmd_sink; Command.goto handles routing.
+    wf.add_edge("cmd_sink", END)
+
+    result = await _invoke(
+        wf,
+        {"user_request": "command routing test", "mode": "single"},
+        run_id="run-s11",
+        trace_id="trace-s11",
+    )
+    logger.info("S11 cmd_result: %s", result.get("cmd_result"))
+    logger.info("S11 log_trail: %s", result.get("log_trail"))
+    return result
+
+
+async def scenario_s11_command_update_goto() -> dict:
+    """cmd_entry → command (remote, mode='update_goto') → cmd_sink.
+
+    Same graph as S11 but command.update carries state + goto routes.
+    """
+    logger.info("═══ S11b: Command update+goto ═══")
+    wf = _make_workflow()
+    wf.add_node("cmd_entry", cmd_entry_node)
+    wf.remote_node("command")
+    wf.add_node("cmd_sink", cmd_sink_node)
+    wf.set_entry_point("cmd_entry")
+    wf.add_edge("cmd_entry", "command")
+    wf.add_edge("cmd_sink", END)
+
+    result = await _invoke(
+        wf,
+        {"user_request": "update and goto test", "mode": "update_goto"},
+        run_id="run-s11b",
+        trace_id="trace-s11b",
+    )
+    logger.info("S11b cmd_result: %s", result.get("cmd_result"))
+    return result
+
+
+# ── Scenario S12: Command multi-goto (Case 15) ────────────────────────────────
+
+
+async def scenario_s12_command_multi_goto() -> dict:
+    """cmd_entry → command (remote, Command.goto=['cmd_sink_a','cmd_sink_b']) → joiner.
+
+    Demonstrates case #15: Command.goto list triggers parallel fan-out.
+    Both sinks execute in the same superstep; results reducer merges them.
+    """
+    logger.info("═══ S12: Command multi-goto (fan-out) ═══")
+    wf = _make_workflow()
+    wf.add_node("cmd_entry", cmd_entry_node)
+    wf.remote_node("command")
+    wf.add_node("cmd_sink_a", cmd_sink_a_node)
+    wf.remote_node("writer")           # remote node — runs in a2a-writer container
+    wf.add_node("cmd_joiner", cmd_joiner_node)
+    wf.set_entry_point("cmd_entry")
+    wf.add_edge("cmd_entry", "command")
+    # No static edges from command → sinks; Command.goto=["cmd_sink_a","writer"]
+    wf.add_edge("cmd_sink_a", "cmd_joiner")
+    wf.add_edge("writer", "cmd_joiner")
+    wf.add_edge("cmd_joiner", END)
+
+    result = await _invoke(
+        wf,
+        {"user_request": "parallel command routing test", "mode": "multi"},
+        run_id="run-s12",
+        trace_id="trace-s12",
+    )
+    results = result.get("results") or []
+    logger.info("S12 results (local branch):  %s", results)
+    logger.info("S12 final_answer (merged):   %s", result.get("final_answer", "")[:120])
+    logger.info("S12 log_trail: %s", result.get("log_trail"))
+    return result
+
+
+# ── Scenario S13: bad goto → proxy_block (Case 14 error path) ────────────────
+
+
+async def scenario_s13_bad_goto_proxy_block() -> dict:
+    """cmd_entry → command (remote, mode='bad_goto') → proxy raises InvalidCommand.
+
+    Demonstrates case #14 error path: the proxy validates command.goto against
+    the registered node set and raises InvalidCommand for unknown targets.
+    Expected outcome is InvalidCommand; the scenario catches it and returns
+    {"proxy_block_verified": True} so main_async() can mark S13 as ok.
+    """
+    logger.info("═══ S13: bad goto → proxy_block (error path) ═══")
+    wf = _make_workflow()
+    wf.add_node("cmd_entry", cmd_entry_node)
+    wf.remote_node("command")
+    # 'nonexistent_node_xyz' is not registered — proxy will reject it
+    wf.set_entry_point("cmd_entry")
+    wf.add_edge("cmd_entry", "command")
+
+    try:
+        await _invoke(
+            wf,
+            {"user_request": "bad goto test", "mode": "bad_goto"},
+            run_id="run-s13",
+            trace_id="trace-s13",
+        )
+        logger.warning("S13: UNEXPECTED — no error raised for bad goto")
+        return {"proxy_block_verified": False}
+    except InvalidCommand:
+        logger.info("S13: InvalidCommand raised as expected — proxy_block verified")
+        return {"proxy_block_verified": True}
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
 async def main_async() -> int:
     tracer = trace.get_tracer("main-langgraph")
 
-    with tracer.start_as_current_span("main-langgraph.sprint2-demo") as span:
-        span.set_attribute("amaze.scenarios", "S1,S2,S3,S4a,S4b,S5,S6,S7")
+    with tracer.start_as_current_span("main-langgraph.sprint4-demo") as span:
+        span.set_attribute("amaze.scenarios", "S1,S2,S3,S4a,S4b,S5,S6,S7,S8,S9,S10,S11,S11b,S12,S13")
 
         outcomes: dict[str, str] = {}
 
@@ -449,8 +743,8 @@ async def main_async() -> int:
             r = await scenario_s1_original()
             outcomes["S1"] = "ok" if r.get("final_answer") else "no-final-answer"
         except Exception as exc:
-            logger.error("S1 failed: %s", exc)
-            outcomes["S1"] = f"FAILED: {exc}"
+            logger.error("S1 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S1"] = f"FAILED: {type(exc).__name__}: {exc}"
 
         # S2 — LLM + MCP tool (skip if no OPENAI_API_KEY)
         try:
@@ -460,8 +754,8 @@ async def main_async() -> int:
             outcomes["S2"] = "SKIP: llm_tool node not running"
             logger.warning("S2: llm_tool node not registered — is a2a-llm-tool running?")
         except Exception as exc:
-            logger.error("S2 failed: %s", exc)
-            outcomes["S2"] = f"FAILED: {exc}"
+            logger.error("S2 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S2"] = f"FAILED: {type(exc).__name__}: {exc}"
 
         # S3 — config echo (thread_id + runtime_context round-trip)
         try:
@@ -473,8 +767,8 @@ async def main_async() -> int:
             outcomes["S3"] = "SKIP: config_echo node not running"
             logger.warning("S3: config_echo node not registered — is a2a-audit running?")
         except Exception as exc:
-            logger.error("S3 failed: %s", exc)
-            outcomes["S3"] = f"FAILED: {exc}"
+            logger.error("S3 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S3"] = f"FAILED: {type(exc).__name__}: {exc}"
 
         # S4a — conditional routing → research
         try:
@@ -483,8 +777,8 @@ async def main_async() -> int:
         except RemoteNodeNotRegistered:
             outcomes["S4a"] = "SKIP: research/writer not running"
         except Exception as exc:
-            logger.error("S4a failed: %s", exc)
-            outcomes["S4a"] = f"FAILED: {exc}"
+            logger.error("S4a failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S4a"] = f"FAILED: {type(exc).__name__}: {exc}"
 
         # S4b — conditional routing → writer
         try:
@@ -493,8 +787,8 @@ async def main_async() -> int:
         except RemoteNodeNotRegistered:
             outcomes["S4b"] = "SKIP: writer not running"
         except Exception as exc:
-            logger.error("S4b failed: %s", exc)
-            outcomes["S4b"] = f"FAILED: {exc}"
+            logger.error("S4b failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S4b"] = f"FAILED: {type(exc).__name__}: {exc}"
 
         # S5 — audit no-op
         try:
@@ -504,8 +798,8 @@ async def main_async() -> int:
             outcomes["S5"] = "SKIP: audit node not running"
             logger.warning("S5: audit node not registered — is a2a-audit running?")
         except Exception as exc:
-            logger.error("S5 failed: %s", exc)
-            outcomes["S5"] = f"FAILED: {exc}"
+            logger.error("S5 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S5"] = f"FAILED: {type(exc).__name__}: {exc}"
 
         # S6 — parallel fan-out
         try:
@@ -518,8 +812,8 @@ async def main_async() -> int:
             outcomes["S6"] = "SKIP: research_a/b not running"
             logger.warning("S6: research_a/b nodes not registered — are a2a-research-a/b running?")
         except Exception as exc:
-            logger.error("S6 failed: %s", exc)
-            outcomes["S6"] = f"FAILED: {exc}"
+            logger.error("S6 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S6"] = f"FAILED: {type(exc).__name__}: {exc}"
 
         # S7 — mixed local + remote reducer
         try:
@@ -532,11 +826,96 @@ async def main_async() -> int:
             outcomes["S7"] = "SKIP: research node not running"
             logger.warning("S7: research node not registered — is a2a-research running?")
         except Exception as exc:
-            logger.error("S7 failed: %s", exc)
-            outcomes["S7"] = f"FAILED: {exc}"
+            logger.error("S7 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S7"] = f"FAILED: {type(exc).__name__}: {exc}"
+
+        # S8 — subgraph node (cases #19 + #20)
+        try:
+            r = await scenario_s8_subgraph()
+            res = r.get("research_result") or ""
+            outcomes["S8"] = "ok" if ("step_a" in res and "step_b" in res) else f"INCOMPLETE research_result={res[:80]}"
+        except RemoteNodeNotRegistered:
+            outcomes["S8"] = "SKIP: subgraph node not running"
+            logger.warning("S8: subgraph node not registered — is a2a-s3 running?")
+        except Exception as exc:
+            logger.error("S8 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S8"] = f"FAILED: {type(exc).__name__}: {exc}"
+
+        # S9 — schema split (case #28)
+        try:
+            r = await scenario_s9_schema_split()
+            has_answer = bool(r.get("final_answer"))
+            no_private = "private_data" not in r
+            outcomes["S9"] = "ok" if (has_answer and no_private) else f"UNEXPECTED keys={list(r.keys())}"
+        except RemoteNodeNotRegistered:
+            outcomes["S9"] = "SKIP: schema_remote node not running"
+            logger.warning("S9: schema_remote node not registered — is a2a-s3 running?")
+        except Exception as exc:
+            logger.error("S9 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S9"] = f"FAILED: {type(exc).__name__}: {exc}"
+
+        # S10 — recursion / step metadata (case #25)
+        try:
+            r = await scenario_s10_recursion_metadata()
+            final_count = r.get("count") or 0
+            step_echo = r.get("langgraph_step_echo")
+            outcomes["S10"] = "ok" if (final_count >= 3 and step_echo is not None) else f"INCOMPLETE count={final_count} step_echo={step_echo}"
+        except RemoteNodeNotRegistered:
+            outcomes["S10"] = "SKIP: counter node not running"
+            logger.warning("S10: counter node not registered — is a2a-s3 running?")
+        except Exception as exc:
+            logger.error("S10 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S10"] = f"FAILED: {type(exc).__name__}: {exc}"
+
+        # S11 — Command single-goto (case #14)
+        try:
+            r = await scenario_s11_command_single_goto()
+            outcomes["S11"] = "ok" if r.get("cmd_result") == "single-goto-result" else f"UNEXPECTED cmd_result={r.get('cmd_result')!r}"
+        except RemoteNodeNotRegistered:
+            outcomes["S11"] = "SKIP: command node not running"
+            logger.warning("S11: command node not registered — is a2a-command running?")
+        except Exception as exc:
+            logger.error("S11 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S11"] = f"FAILED: {type(exc).__name__}: {exc}"
+
+        # S11b — Command update+goto (case #14 variant)
+        try:
+            r = await scenario_s11_command_update_goto()
+            cmd = r.get("cmd_result") or ""
+            outcomes["S11b"] = "ok" if cmd.startswith("processed:") else f"UNEXPECTED cmd_result={cmd!r}"
+        except RemoteNodeNotRegistered:
+            outcomes["S11b"] = "SKIP: command node not running"
+            logger.warning("S11b: command node not registered — is a2a-command running?")
+        except Exception as exc:
+            logger.error("S11b failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S11b"] = f"FAILED: {type(exc).__name__}: {exc}"
+
+        # S12 — Command multi-goto / fan-out (case #15)
+        try:
+            r = await scenario_s12_command_multi_goto()
+            results = set(r.get("results") or [])
+            # cmd_sink_a (local) appends to results; writer (remote) writes final_answer
+            outcomes["S12"] = "ok" if "from_cmd_sink_a" in results else f"INCOMPLETE results={results}"
+        except RemoteNodeNotRegistered:
+            outcomes["S12"] = "SKIP: command node not running"
+            logger.warning("S12: command node not registered — is a2a-command running?")
+        except Exception as exc:
+            logger.error("S12 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S12"] = f"FAILED: {type(exc).__name__}: {exc}"
+
+        # S13 — bad goto → proxy_block (case #14 error path)
+        try:
+            r = await scenario_s13_bad_goto_proxy_block()
+            outcomes["S13"] = "ok (proxy_block verified)" if r.get("proxy_block_verified") else "UNEXPECTED: no error raised"
+        except RemoteNodeNotRegistered:
+            outcomes["S13"] = "SKIP: command node not running"
+            logger.warning("S13: command node not registered — is a2a-command running?")
+        except Exception as exc:
+            logger.error("S13 failed unexpectedly [%s]: %s", type(exc).__name__, exc)
+            outcomes["S13"] = f"FAILED: {type(exc).__name__}: {exc}"
 
         # Summary
-        logger.info("═══ Sprint 2 demo summary ═══")
+        logger.info("═══ Sprint 3 demo summary ═══")
         all_ok = True
         for scenario, status in outcomes.items():
             prefix = "✓" if status.startswith("ok") else ("⚠" if status.startswith("SKIP") else "✗")

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
@@ -14,6 +15,15 @@ from opentelemetry import trace
 logger = logging.getLogger(__name__)
 
 _OTEL_INITIALIZED = False
+
+_shared_http_clients: dict[tuple[str, float], httpx.AsyncClient] = {}
+
+
+def _get_shared_http_client(url: str, timeout: float) -> httpx.AsyncClient:
+    key = (url, timeout)
+    if key not in _shared_http_clients:
+        _shared_http_clients[key] = httpx.AsyncClient(timeout=timeout)
+    return _shared_http_clients[key]
 
 
 class AmazeGraphError(Exception):
@@ -60,6 +70,29 @@ class InvalidStatePatch(AmazeGraphError):
 
 class OrchestratorUnavailable(AmazeGraphError):
     pass
+
+
+@dataclass
+class AmazeCommand:
+    """Return this from a remote node handler to control graph routing.
+
+    Instead of a plain state-patch dict, the handler returns AmazeCommand
+    and _common.py translates it to the {"command": ...} wire format. Using
+    a typed return avoids any key-collision with state fields named "command".
+    """
+    goto: "str | list[str]"
+    update: "dict | None" = None
+
+
+class InvalidCommand(AmazeGraphError):
+    def __init__(self, graph_id: str, node_name: str, reason: str) -> None:
+        super().__init__(
+            f"invalid command from remote node: graph_id={graph_id} "
+            f"node_name={node_name} reason={reason}"
+        )
+        self.graph_id = graph_id
+        self.node_name = node_name
+        self.reason = reason
 
 
 class OrchestratorClient:
@@ -147,9 +180,10 @@ class AmazeGraph:
         *,
         graph_id: str,
         orchestrator_url: str | None = None,
+        **langgraph_kwargs: Any,
     ) -> None:
         self.graph_id = graph_id
-        self.graph = StateGraph(state_schema)
+        self.graph = StateGraph(state_schema, **langgraph_kwargs)
         url = orchestrator_url or os.environ.get("AMAZE_ORCHESTRATOR_URL")
         if not url:
             raise ValueError(
@@ -162,7 +196,6 @@ class AmazeGraph:
         self._nodes: list[str] = []
         self._edges: list[tuple[str, str]] = []
         self._entry: str | None = None
-        self._http_client: httpx.AsyncClient | None = None
 
     def add_node(self, name: str, action: Any, *args: Any, **kwargs: Any) -> "AmazeGraph":
         self._nodes.append(name)
@@ -225,9 +258,8 @@ class AmazeGraph:
         return self.graph.compile(*args, **kwargs)
 
     def _get_http_client(self) -> httpx.AsyncClient:
-        if self._http_client is None:
-            self._http_client = httpx.AsyncClient(timeout=30.0)
-        return self._http_client
+        timeout = float(os.environ.get("AMAZE_NODE_INVOKE_TIMEOUT", "30.0"))
+        return _get_shared_http_client(self.orchestrator_url, timeout)
 
     def _make_event(
         self,
@@ -236,8 +268,9 @@ class AmazeGraph:
         trace_id: str | None,
         status: str | None = None,
         error: str | None = None,
+        error_kind: str | None = None,
     ) -> dict:
-        return {
+        event: dict = {
             "event": event_type,
             "graph_id": self.graph_id,
             "node_name": node_name,
@@ -246,10 +279,13 @@ class AmazeGraph:
             "error": error,
             "ts": datetime.now(timezone.utc).isoformat(),
         }
+        if error_kind is not None:
+            event["error_kind"] = error_kind
+        return event
 
     def _make_remote_proxy(
         self, node_name: str
-    ) -> Callable[..., Awaitable[dict]]:
+    ) -> Callable[..., Awaitable[Any]]:
         async def remote_proxy(
             state: dict,
             config: RunnableConfig | None = None,
@@ -298,6 +334,7 @@ class AmazeGraph:
             }
             config_subset = {k: v for k, v in config_subset_raw.items() if v is not None}
 
+            logger.info("▶ [%s] invoking remote node (graph=%s)", node_name, self.graph_id)
             tracer = trace.get_tracer(__name__)
             with tracer.start_as_current_span("amazegraph.invoke_remote") as span:
                 span.set_attribute("amaze.graph_id", self.graph_id)
@@ -321,6 +358,7 @@ class AmazeGraph:
                                 trace_id,
                                 status="error",
                                 error="node-not-registered",
+                                error_kind="proxy_block",
                             ),
                         )
                     raise
@@ -344,6 +382,22 @@ class AmazeGraph:
                 client = self._get_http_client()
                 try:
                     response = await client.post(endpoint, json=payload)
+                except httpx.TimeoutException as exc:
+                    if run_id:
+                        await self.orchestrator.emit_event(
+                            run_id,
+                            self._make_event(
+                                "node-error",
+                                node_name,
+                                trace_id,
+                                status="error",
+                                error=f"timeout: {exc}",
+                                error_kind="timeout",
+                            ),
+                        )
+                    raise RemoteNodeInvokeError(
+                        self.graph_id, node_name, None, str(exc)
+                    ) from exc
                 except httpx.TransportError as exc:
                     if run_id:
                         await self.orchestrator.emit_event(
@@ -354,6 +408,7 @@ class AmazeGraph:
                                 trace_id,
                                 status="error",
                                 error=f"transport: {exc}",
+                                error_kind="proxy_block",
                             ),
                         )
                     raise RemoteNodeInvokeError(
@@ -371,6 +426,7 @@ class AmazeGraph:
                                 trace_id,
                                 status="error",
                                 error=f"http-{response.status_code}",
+                                error_kind="node_error",
                             ),
                         )
                     raise RemoteNodeInvokeError(
@@ -389,12 +445,116 @@ class AmazeGraph:
                                 trace_id,
                                 status="error",
                                 error="invalid-json",
+                                error_kind="node_error",
                             ),
                         )
                     raise InvalidStatePatch(
                         self.graph_id, node_name, response.text
                     ) from exc
 
+                # ── Command detection (Cases 14 + 15) ──────────────────────
+                command_raw = body.get("command")
+                if command_raw is not None:
+                    if not isinstance(command_raw, dict):
+                        if run_id:
+                            await self.orchestrator.emit_event(
+                                run_id,
+                                self._make_event(
+                                    "node-error", node_name, trace_id,
+                                    status="error",
+                                    error="invalid-command-shape",
+                                    error_kind="proxy_block",
+                                ),
+                            )
+                        raise InvalidCommand(
+                            self.graph_id, node_name,
+                            "command must be a dict"
+                        )
+
+                    goto_raw = command_raw.get("goto")
+                    if not goto_raw and goto_raw != 0:
+                        if run_id:
+                            await self.orchestrator.emit_event(
+                                run_id,
+                                self._make_event(
+                                    "node-error", node_name, trace_id,
+                                    status="error",
+                                    error="invalid-command-empty-goto",
+                                    error_kind="proxy_block",
+                                ),
+                            )
+                        raise InvalidCommand(
+                            self.graph_id, node_name,
+                            "command.goto is required and non-empty"
+                        )
+
+                    if isinstance(goto_raw, str):
+                        goto_targets: list[str] = [goto_raw]
+                    elif isinstance(goto_raw, list):
+                        goto_targets = goto_raw
+                    else:
+                        if run_id:
+                            await self.orchestrator.emit_event(
+                                run_id,
+                                self._make_event(
+                                    "node-error", node_name, trace_id,
+                                    status="error",
+                                    error=f"invalid-command-goto-type:{type(goto_raw).__name__}",
+                                    error_kind="proxy_block",
+                                ),
+                            )
+                        raise InvalidCommand(
+                            self.graph_id, node_name,
+                            f"command.goto must be str or list, got {type(goto_raw).__name__}"
+                        )
+
+                    known = set(self._nodes) | {"__end__"}
+                    for target in goto_targets:
+                        if target not in known:
+                            if run_id:
+                                await self.orchestrator.emit_event(
+                                    run_id,
+                                    self._make_event(
+                                        "node-error", node_name, trace_id,
+                                        status="error",
+                                        error=f"unknown-goto-target:{target}",
+                                        error_kind="proxy_block",
+                                    ),
+                                )
+                            raise InvalidCommand(
+                                self.graph_id, node_name,
+                                f"command.goto target {target!r} not in graph"
+                            )
+
+                    update_patch = command_raw.get("update") or {}
+                    if not isinstance(update_patch, dict):
+                        if run_id:
+                            await self.orchestrator.emit_event(
+                                run_id,
+                                self._make_event(
+                                    "node-error", node_name, trace_id,
+                                    status="error",
+                                    error="invalid-command-update-type",
+                                    error_kind="proxy_block",
+                                ),
+                            )
+                        raise InvalidCommand(
+                            self.graph_id, node_name,
+                            "command.update must be a dict"
+                        )
+
+                    if run_id:
+                        await self.orchestrator.emit_event(
+                            run_id,
+                            self._make_event(
+                                "node-exit", node_name, trace_id, status="ok"
+                            ),
+                        )
+
+                    from langgraph.types import Command as LGCommand
+                    return LGCommand(update=update_patch, goto=goto_raw)
+
+                # ── Existing state_patch path (unchanged) ───────────────────
                 state_patch = body.get("state_patch")
                 if not isinstance(state_patch, dict):
                     if run_id:
@@ -406,6 +566,7 @@ class AmazeGraph:
                                 trace_id,
                                 status="error",
                                 error="invalid-state-patch",
+                                error_kind="node_error",
                             ),
                         )
                     raise InvalidStatePatch(self.graph_id, node_name, body)
@@ -422,9 +583,6 @@ class AmazeGraph:
         return remote_proxy
 
     async def aclose(self) -> None:
-        if self._http_client is not None:
-            await self._http_client.aclose()
-            self._http_client = None
         await self.orchestrator.close()
 
 

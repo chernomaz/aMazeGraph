@@ -153,6 +153,97 @@ def sprint2_demo(compose_stack) -> subprocess.CompletedProcess:
     return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
 
 
+@pytest.fixture(scope="session")
+def sprint3_stack(compose_stack) -> None:
+    """Extend compose_stack with Sprint 3 services (a2a-s3, a2a-s3-counter, a2a-s3-schema)."""
+    if os.environ.get("AMAZEGRAPH_SKIP_COMPOSE") == "1":
+        return
+    _compose(
+        "up", "-d", "--build",
+        "a2a-s3", "a2a-s3-counter", "a2a-s3-schema",
+        "a2a-llm-tool", "a2a-audit", "a2a-research-a", "a2a-research-b",
+        check=True,
+        timeout=900,
+    )
+    # Wait for S3 services via orchestrator node registration
+    s3_nodes = ["subgraph", "counter", "schema_remote"]
+    for node in s3_nodes:
+        deadline = time.time() + 120.0
+        while time.time() < deadline:
+            try:
+                r = httpx.get(
+                    f"{ORCHESTRATOR_URL}/resolve/node/demo_graph_v1/{node}",
+                    timeout=2.0,
+                )
+                if r.status_code == 200:
+                    break
+            except Exception:
+                pass
+            time.sleep(1.0)
+        else:
+            raise RuntimeError(f"S3 node '{node}' did not register within 120s")
+
+
+@pytest.fixture(scope="session")
+def sprint3_demo(sprint3_stack) -> subprocess.CompletedProcess:
+    """Run the full Sprint 3 demo once; shared across ST-RLG-15..18.
+
+    All scenarios S1-S10 run in a single container so each test can query
+    orchestrator using fixed run IDs: run-s8, run-s9, run-s10.
+    """
+    cmd = [
+        "docker", "compose",
+        "-p", PROJECT,
+        "-f", str(COMPOSE_FILE),
+        "run", "--rm", "main-langgraph",
+    ]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+
+@pytest.fixture(scope="session")
+def sprint4_stack(compose_stack) -> None:
+    """Extend compose_stack with the Sprint 4 a2a-command service and wait for it to register."""
+    if os.environ.get("AMAZEGRAPH_SKIP_COMPOSE") == "1":
+        return
+    _compose(
+        "up", "-d", "--build",
+        "a2a-command",
+        check=True,
+        timeout=900,
+    )
+    # a2a-command does NOT publish a host port; verify registration via orchestrator.
+    deadline = time.time() + 120.0
+    while time.time() < deadline:
+        try:
+            r = httpx.get(
+                f"{ORCHESTRATOR_URL}/resolve/node/demo_graph_v1/command",
+                timeout=2.0,
+            )
+            if r.status_code == 200:
+                break
+        except Exception:
+            pass
+        time.sleep(1.0)
+    else:
+        raise RuntimeError("S4 node 'command' did not register within 120s")
+
+
+@pytest.fixture(scope="session")
+def sprint4_demo(sprint4_stack) -> subprocess.CompletedProcess:
+    """Run the full Sprint 4 demo once; shared across Sprint 4 system tests.
+
+    All Sprint 4 scenarios run in a single container so each test can query
+    the orchestrator using fixed run IDs defined in the demo script.
+    """
+    cmd = [
+        "docker", "compose",
+        "-p", PROJECT,
+        "-f", str(COMPOSE_FILE),
+        "run", "--rm", "main-langgraph",
+    ]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+
+
 @pytest.fixture
 def research_with_env():
     container_name = f"{PROJECT}-a2a-research-debug"

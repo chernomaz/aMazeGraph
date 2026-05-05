@@ -479,6 +479,7 @@ Sprint 2 vendors a FastMCP server at `examples/mcp_server/` (copied from
 
 ### 9.8 Updated request schema (`POST /invoke`)
 
+
 ```json
 {
   "graph_id": "...",
@@ -500,3 +501,226 @@ Sprint 2 vendors a FastMCP server at `examples/mcp_server/` (copied from
 Response shape unchanged from Sprint 1 (`{"state_patch": dict}`). Sprint 2
 clients **continue to** ignore unknown keys in the response, in preparation
 for `command` / `interrupt` siblings in S4+.
+
+---
+
+## 10. Sprint 3 addendum
+
+Sprint 3 adds support for 5 medium-tier capabilities (cases 19, 20, 25, 27, 28).
+All changes are **additive** — Sprint 1 and Sprint 2 clients are unaffected.
+
+### 10.1 Subgraph as opaque node (cases 19 + 20)
+
+A remote node may internally compile and run its own `StateGraph`. The driver
+sees only a single registered endpoint and a normal `state_patch` response.
+
+Author obligations:
+- Register the subgraph node under a single `node_name` (e.g. `"subgraph"`).
+- The remote handler creates a `StateGraph`, compiles it locally (no
+  orchestrator involvement), runs `await app.ainvoke(...)` inside the `async`
+  handler, and returns the merged result as a plain dict.
+- The inner graph's nodes and edges are invisible to the outer orchestrator;
+  they do **not** appear in the outer graph manifest.
+- Case #20 ("call subgraph manually") is the same wire contract — the handler
+  decides internally whether to use LangGraph's `ainvoke` or call sub-nodes
+  imperatively. The outer driver is unaffected.
+
+No proxy or orchestrator changes required.
+
+### 10.2 Recursion / step metadata (case 25)
+
+`config["metadata"]["langgraph_step"]` and `config["recursion_limit"]` already
+survive the wire via the S1/S2 `config` subset (§3.1). Sprint 3 verifies them
+end-to-end and adds a guard against runaway recursion.
+
+Wire guarantee (unchanged):
+- `config.metadata.langgraph_step` — integer, incremented by LangGraph per
+  superstep. Arrives at the remote node on every invocation. Remote nodes
+  **may** read it for observability; they **must not** rely on it for
+  correctness logic.
+- `config.recursion_limit` — integer, the graph-level cap. LangGraph on the
+  driver side raises `GraphRecursionError` when the limit is exceeded; the
+  remote node is never invoked past that point.
+
+Author obligations:
+- Graphs with cycles where a remote node is inside the loop must declare an
+  appropriate `recursion_limit` (default 25). A low limit (e.g. 3) is useful
+  for test scenarios.
+- The remote node handler may log `langgraph_step` for debugging.
+
+### 10.3 Richer error taxonomy (case 27)
+
+Sprint 3 extends the `node-error` run event with an `error_kind` field that
+classifies the failure.
+
+#### Updated run-event schema
+
+The `error_kind` field is **new** in Sprint 3. Older consumers that don't
+recognize it MUST ignore it (already required by §3.1 "future sprints may add
+sibling keys").
+
+`POST /runs/{run_id}/events` accepts the new optional field:
+
+```json
+{
+  "event": "node-error",
+  "graph_id": "...",
+  "node_name": "...",
+  "trace_id": "...",
+  "status": "error",
+  "error": "...",
+  "error_kind": "node_error",
+  "ts": "..."
+}
+```
+
+`GET /runs/{run_id}` returns `error_kind` in the event object when present.
+
+#### `error_kind` value taxonomy
+
+| Value | Meaning | Proxy condition |
+|---|---|---|
+| `node_error` | The node handler raised an exception or returned malformed data | HTTP 5xx from node; non-dict `state_patch`; invalid JSON body |
+| `proxy_block` | The proxy could not reach the node at all | `RemoteNodeNotRegistered` (404 from orchestrator); connection refused |
+| `timeout` | The node took longer than the configured invoke timeout | `httpx.TimeoutException` during POST to node |
+| `policy_violation` | Blocked by a future enforcement layer | *Reserved — not emitted in Sprint 3* |
+| `tool_error` | A tool call inside the node failed | *Reserved — not emitted in Sprint 3* |
+
+#### Proxy timeout configuration
+
+The AmazeGraph proxy respects the `AMAZE_NODE_INVOKE_TIMEOUT` environment
+variable (float, seconds, default `30.0`). Set it low in tests that need to
+trigger a `timeout` error kind.
+
+### 10.4 Input / output / private schemas (case 28)
+
+LangGraph's `StateGraph(FullState, input=InputState, output=OutputState)`
+mechanism works transparently with remote nodes.
+
+Rules:
+- `app.ainvoke(input_dict)` accepts only `InputState`-typed keys at the
+  graph boundary; unrecognized input keys are ignored by LangGraph.
+- The proxy sends the **full current channel state** to each remote node
+  (same as Sprint 1). The remote node may read any field that exists in the
+  channel at invocation time — including fields that are not part of
+  `InputState` if prior nodes have populated them.
+- `app.ainvoke(...)` returns only `OutputState`-typed keys. `PrivateState`
+  fields are **not** present in the caller-facing result.
+- Remote nodes whose `state_patch` writes to `PrivateState` fields function
+  correctly; those fields are visible inside the graph but filtered from the
+  final output.
+
+No proxy or orchestrator changes required.
+
+---
+
+## 11. Sprint 4 addendum — `Command` response sibling (cases 14 + 15)
+
+Sprint 4 lets a remote node drive graph routing instead of static edges by
+returning an `AmazeCommand` from its handler. All validation is proxy-side;
+the orchestrator does not change.
+
+### 11.1 Handler-side authoring (`AmazeCommand`)
+
+Remote node handlers that want to control routing return an `AmazeCommand`
+instead of a plain dict:
+
+```python
+from sdk.amaze import AmazeCommand
+
+# Case 14 — single goto
+async def my_node(state, config):
+    return AmazeCommand(update={"result": "done"}, goto="next_node")
+
+# Case 15 — multi-goto (parallel fan-out)
+async def my_node(state, config):
+    return AmazeCommand(update={}, goto=["branch_a", "branch_b"])
+```
+
+`AmazeCommand` is a dataclass with two fields:
+- `update: dict | None` — state fields to merge (equivalent to a `state_patch`).
+  Defaults to `{}` when `None`.
+- `goto: str | list[str]` — target node name(s).
+
+Returning a plain dict always produces a normal `state_patch` — handlers can
+still have a state field named `"command"` without any ambiguity.
+
+### 11.2 Wire format (`POST /invoke` response)
+
+`_common.py` translates an `AmazeCommand` return value into the wire response:
+
+```json
+{
+  "command": {
+    "update": { "result": "done" },
+    "goto": "next_node"
+  }
+}
+```
+
+For multi-goto (Case 15):
+```json
+{
+  "command": {
+    "update": {},
+    "goto": ["branch_a", "branch_b"]
+  }
+}
+```
+
+Rules:
+- `command` is an optional top-level sibling of `state_patch`. When present,
+  `state_patch` MUST NOT also be present (the proxy ignores any `state_patch`
+  when `command` is detected).
+- `command.update` is a JSON object. Defaults to `{}` when absent.
+- `command.goto` is required and non-empty. Either a string (single target) or
+  a non-empty array of strings (multi-target fan-out).
+- Older clients that only read `state_patch` will see `None` and raise
+  `InvalidStatePatch`. Sprint 1–3 clients **must** upgrade before routing to
+  nodes that may return `AmazeCommand`.
+
+### 11.3 Proxy behaviour
+
+On receiving a response with a `command` key, the proxy:
+
+1. Validates `command` shape (must be a dict). Emits `node-error`
+   (`error_kind="proxy_block"`) and raises `InvalidCommand` on failure.
+2. Normalises `goto` to a list. Rejects empty list.
+3. Validates each `goto` target against
+   `set(self._nodes) | {"__end__"}` — the set of node names registered with
+   this `AmazeGraph` instance plus the LangGraph end sentinel. Unknown targets
+   → `node-error` (`error_kind="proxy_block"`) + `InvalidCommand`.
+4. Emits `node-exit` (status=ok).
+5. Returns `langgraph.types.Command(update=..., goto=...)` to the driver.
+   LangGraph then routes to the specified node(s) in the next superstep.
+
+When `command` is absent the proxy falls through to the existing `state_patch`
+validation path — fully backward-compatible.
+
+### 11.4 `InvalidCommand` exception
+
+```python
+class InvalidCommand(AmazeGraphError):
+    graph_id: str
+    node_name: str
+    reason: str   # human-readable, includes the offending goto value
+```
+
+Exported from `sdk.amaze`. Raised (and always preceded by a `node-error` run
+event with `error_kind="proxy_block"`) when:
+- `command` value is not a dict.
+- `command.goto` is absent, empty, or not a str/list.
+- Any `goto` target is not in `set(self._nodes) | {"__end__"}`.
+
+### 11.5 Parallel fan-out via `Command.goto` list (Case 15)
+
+`Command(goto=["a", "b"])` in LangGraph 1.1.6 dispatches both targets in the
+**same superstep** — true parallel fan-out. Verified in Sprint 4 integration
+test. State fields written by both branches must declare a reducer (§9.1),
+identical to the static-edge fan-out constraint.
+
+### 11.6 Orchestrator changes
+
+None. The orchestrator does not inspect `command` or validate `goto` targets.
+All routing validation is local to the proxy process, which has full knowledge
+of the compiled graph's node set.

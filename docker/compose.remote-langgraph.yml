@@ -69,6 +69,7 @@ services:
       retries: 30
 
   mcp:
+    profiles: [sprint2]
     # Vendored from /home/ubuntu/data/cloude/newAmazeControlPlane/aMaze/examples/mcp_server/
     # FastMCP streamable-http server; auto-discovers @tool functions in tools/*.py.
     build:
@@ -85,9 +86,109 @@ services:
       timeout: 3s
       retries: 30
 
+  # Sprint 3 nodes ──────────────────────────────────────────────────────────
+
+  a2a-s3:
+    profiles: [sprint3]
+    # ST-RLG-15..18: subgraph (cases 19+20), counter (case 25), schema_remote (case 28)
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.a2a-node
+      args:
+        NODE_MODULE: examples.a2a_nodes.subgraph_node
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      A2A_NODE_HOST: 0.0.0.0
+      A2A_NODE_PORT: "9008"
+      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-s3:9008/invoke
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9008/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  a2a-s3-counter:
+    profiles: [sprint3]
+    # counter node for recursion/step metadata (case 25)
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.a2a-node
+      args:
+        NODE_MODULE: examples.a2a_nodes.counter_node
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      A2A_NODE_HOST: 0.0.0.0
+      A2A_NODE_PORT: "9009"
+      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-s3-counter:9009/invoke
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9009/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  a2a-s3-schema:
+    profiles: [sprint3]
+    # schema_remote node for input/output/private schemas demo (case 28)
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.a2a-node
+      args:
+        NODE_MODULE: examples.a2a_nodes.schema_node
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      A2A_NODE_HOST: 0.0.0.0
+      A2A_NODE_PORT: "9010"
+      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-s3-schema:9010/invoke
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9010/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  # Sprint 4 nodes ──────────────────────────────────────────────────────────
+
+  a2a-command:
+    profiles: [sprint4]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.a2a-node
+      args:
+        NODE_MODULE: examples.a2a_nodes.command_node
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      A2A_NODE_HOST: 0.0.0.0
+      A2A_NODE_PORT: "9011"
+      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-command:9011/invoke
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9011/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
   # Sprint 2 nodes ──────────────────────────────────────────────────────────
 
   a2a-llm-tool:
+    profiles: [sprint2]
     # ST-RLG-9: real OpenAI ChatOpenAI + MCP web_search
     build:
       context: ..
@@ -115,6 +216,7 @@ services:
       retries: 30
 
   a2a-audit:
+    profiles: [sprint2]
     # ST-RLG-10, ST-RLG-12: audit no-op + config_echo handlers (single container)
     build:
       context: ..
@@ -138,6 +240,7 @@ services:
       retries: 30
 
   a2a-research-a:
+    profiles: [sprint2]
     # ST-RLG-13: parallel fan-out branch A
     build:
       context: ..
@@ -161,6 +264,7 @@ services:
       retries: 30
 
   a2a-research-b:
+    profiles: [sprint2]
     # ST-RLG-13: parallel fan-out branch B
     build:
       context: ..
@@ -202,15 +306,5 @@ services:
       a2a-research:
         condition: service_healthy
       a2a-writer:
-        condition: service_healthy
-      mcp:
-        condition: service_healthy
-      a2a-llm-tool:
-        condition: service_healthy
-      a2a-audit:
-        condition: service_healthy
-      a2a-research-a:
-        condition: service_healthy
-      a2a-research-b:
         condition: service_healthy
     restart: "no"

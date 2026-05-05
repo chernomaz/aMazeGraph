@@ -27,32 +27,47 @@ def test_st_rlg_2_nodes_registered(orchestrator_url: str) -> None:
 
 
 def test_st_rlg_3_graph_manifest(orchestrator_url: str, run_main_langgraph) -> None:
-    result = run_main_langgraph(run_id="run-manifest-1")
+    # Run the full demo — multiple scenarios register different topologies
+    # under the same graph_id; the last compile() wins.  We verify the API
+    # contract (correct status code, valid JSON shape) rather than a specific
+    # node set, because the node list changes as more scenarios are added.
+    result = run_main_langgraph()
     assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
 
     r = httpx.get(f"{orchestrator_url}/graphs/{GRAPH_ID}", timeout=5.0)
     assert r.status_code == 200, r.text
     manifest = r.json()
     assert manifest["graph_id"] == GRAPH_ID
-    assert set(manifest["nodes"]) >= {"start", "research", "post_research", "writer", "post_writer"}
-    edge_pairs = {tuple(e) for e in manifest["edges"]}
-    assert ("start", "research") in edge_pairs
-    assert ("research", "post_research") in edge_pairs
-    assert ("post_research", "writer") in edge_pairs
-    assert ("writer", "post_writer") in edge_pairs
+    assert isinstance(manifest["nodes"], list), "nodes should be a list"
+    assert len(manifest["nodes"]) >= 2, f"expected at least 2 nodes, got: {manifest['nodes']}"
+    assert isinstance(manifest["edges"], list), "edges should be a list"
+    # The S1 nodes are always registered (first scenario always runs)
+    # and any subsequent compile() adds its nodes.  Verify at least the
+    # S1 remote nodes were seen by the orchestrator's resolve endpoint:
+    r_res = httpx.get(f"{orchestrator_url}/resolve/node/{GRAPH_ID}/research", timeout=5.0)
+    assert r_res.status_code == 200, "research node should still be resolvable"
+    r_wri = httpx.get(f"{orchestrator_url}/resolve/node/{GRAPH_ID}/writer", timeout=5.0)
+    assert r_wri.status_code == 200, "writer node should still be resolvable"
 
 
 def test_st_rlg_4_end_to_end_run(orchestrator_url: str, jaeger_url: str, run_main_langgraph) -> None:
     result = run_main_langgraph()
     assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
-    assert "FINAL RESULT:" in result.stdout
-    assert "final_answer" in result.stdout.lower() or "FINAL RESULT:" in result.stdout
+    # S1 (original research→writer flow) always runs first and must succeed.
+    # The demo now uses structured logger output instead of a bare FINAL RESULT print.
+    assert "✓ S1: ok" in result.stdout, (
+        f"S1 scenario did not report ok in demo output:\n{result.stdout[-3000:]}"
+    )
+    assert "S1 final_answer:" in result.stdout, (
+        f"S1 final_answer log line missing:\n{result.stdout[-3000:]}"
+    )
 
-    r = httpx.get(f"{orchestrator_url}/runs/run-1", timeout=5.0)
+    # S1 uses run_id="run-s1"; verify its orchestrator events.
+    r = httpx.get(f"{orchestrator_url}/runs/run-s1", timeout=5.0)
     assert r.status_code == 200, r.text
     run = r.json()
     assert run["meta"]["graph_id"] == GRAPH_ID
-    assert run["meta"]["trace_id"] == "trace-1"
+    assert run["meta"]["trace_id"] == "trace-s1"
 
     events = run["events"]
     seen_events = [(e["event"], e.get("node_name", "")) for e in events]
@@ -66,6 +81,7 @@ def test_st_rlg_4_end_to_end_run(orchestrator_url: str, jaeger_url: str, run_mai
     writer_enter = next(i for i, ev in enumerate(seen_events) if ev == ("node-enter", "writer"))
     assert research_enter < writer_enter
 
+    # Verify a Jaeger trace was emitted for the S1 run.
     deadline = time.time() + 30.0
     trace_found = False
     while time.time() < deadline and not trace_found:
@@ -80,14 +96,14 @@ def test_st_rlg_4_end_to_end_run(orchestrator_url: str, jaeger_url: str, run_mai
                 spans = trace.get("spans", [])
                 for span in spans:
                     tags = {t["key"]: t.get("value") for t in span.get("tags", [])}
-                    if tags.get("amaze.run_id") == "run-1":
+                    if tags.get("amaze.run_id") == "run-s1":
                         trace_found = True
                         break
                 if trace_found:
                     break
         if not trace_found:
             time.sleep(2.0)
-    assert trace_found, "no Jaeger trace found with amaze.run_id=run-1"
+    assert trace_found, "no Jaeger trace found with amaze.run_id=run-s1"
 
 
 def test_st_rlg_5_missing_remote_node(temporarily_unregister_node, run_main_langgraph) -> None:
