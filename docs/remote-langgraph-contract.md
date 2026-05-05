@@ -822,3 +822,165 @@ None. The checkpointer writes to the same embedded Redis instance that the
 orchestrator uses, but under different key prefixes (`checkpoint:*`,
 `checkpoint_write:*`) that do not collide with orchestrator keys
 (`graph_node:*`, `graph:*`, `run:*`).
+
+---
+
+## 13. Sprint 7 addendum — LangSmith trace propagation + Node-level caching
+
+Sprint 7 adds two features: (1) LangSmith parent run ID propagated to remote
+nodes so LLM calls inside them appear in the driver's trace, and (2)
+node-level caching so repeated identical invocations skip the remote call.
+All changes are **additive and backward-compatible** — Sprint 1–6 clients are
+unaffected.
+
+### 13.1 LangSmith trace propagation
+
+**Problem:** `config["callbacks"]` (which contains `LangChainTracer`) is
+stripped before the wire call because it holds live Python objects. Remote
+node LLM calls therefore produce disconnected or missing LangSmith traces.
+
+**Solution:** The driver extracts the `parent_run_id` from the
+`CallbackManager` and passes it as a new optional wire field. The remote node
+reconstructs a `LangChainTracer` with that parent and injects it into the
+handler config so LLM calls nest correctly.
+
+#### Updated `POST /invoke` request schema
+
+New optional top-level field `langsmith_context`:
+
+```json
+{
+  "graph_id": "...",
+  "node_name": "...",
+  "run_id": "...",
+  "trace_id": "...",
+  "state": { ... },
+  "config": { ... },
+  "runtime_context": { ... },
+  "langsmith_context": {
+    "parent_run_id": "uuid-of-graph-or-node-run",
+    "project_name": "aMazeGraph"
+  }
+}
+```
+
+Rules:
+- `langsmith_context` is `null`/absent when LangSmith is not enabled on the
+  driver. Remote nodes MUST treat absent `langsmith_context` as a no-op.
+- Both `parent_run_id` and `project_name` are strings. `parent_run_id` is a
+  UUID string. `project_name` falls back to the `LANGCHAIN_PROJECT` env var.
+- The remote node calls `LangChainTracer(parent_run_id=UUID(...), project_name=...)`
+  and injects it into `config["callbacks"]` before dispatching to the handler.
+  Construction failures (missing `langchain-core`, bad UUID) are swallowed with
+  a DEBUG log — graceful degradation.
+- The remote node MUST have `LANGCHAIN_TRACING_V2=true` and `LANGSMITH_API_KEY`
+  set in its environment to write traces. Sprint 7 adds these vars to all
+  `a2a-*` compose services via `${LANGCHAIN_TRACING_V2:-false}` pass-through.
+- Handler authors MUST pass `config=config` to every `LLM.ainvoke()` call
+  inside their handler so the injected tracer propagates into LLM child runs.
+
+#### Remote node log line (observable for tests)
+
+When `langsmith_context.parent_run_id` is successfully used, the remote node
+logs at INFO:
+```
+LangSmith parent_run_id=<uuid> project=<name>
+```
+
+### 13.2 Node-level caching
+
+A remote node handler can declare a TTL for its responses. Repeated
+invocations with identical `(graph_id, node_name, state)` inputs return
+the cached response without calling the node.
+
+#### `cache_ttl` on `@remote_node`
+
+```python
+@remote_node(graph_id="demo_graph_v1", node_name="cached_node", cache_ttl=60)
+async def handler(state: dict, config: dict) -> dict:
+    ...
+```
+
+`cache_ttl` (integer, seconds) is optional. When `None` (default), caching is
+disabled for that node.
+
+#### `cache_ttl` flows through registration
+
+`POST /register/node` now accepts an optional `cache_ttl` field:
+
+```json
+{
+  "graph_id": "demo_graph_v1",
+  "node_name": "cached_node",
+  "endpoint": "http://a2a-cached:9017/invoke",
+  "cache_ttl": 60
+}
+```
+
+`GET /resolve/node/{graph_id}/{node_name}` now returns `cache_ttl`:
+
+```json
+{
+  "graph_id": "demo_graph_v1",
+  "node_name": "cached_node",
+  "endpoint": "http://a2a-cached:9017/invoke",
+  "cache_ttl": 60
+}
+```
+
+#### Cache key
+
+```
+SHA256(graph_id + ":" + node_name + ":" + json.dumps(state, sort_keys=True))[:32]
+```
+
+`runtime_context` is **excluded** from the cache key. Node authors who need
+tenant-scoped caching should include the discriminating value in `state`.
+
+#### New orchestrator cache endpoints
+
+**`GET /cache/{key}`**
+
+Reads `cache:{key}` from Redis. Returns:
+```json
+{ "hit": true,  "body": { ... } }   // cache hit
+{ "hit": false }                      // cache miss
+```
+- `key` must match `^[a-f0-9]{32,64}$`.
+- Returns 404-equivalent via `hit: false` (not an HTTP 404) on miss.
+- Returns 503 on Redis error.
+
+**`PUT /cache/{key}`**
+
+Stores the wire response body with TTL:
+```json
+{ "body": { "state_patch": { ... } }, "ttl": 60 }
+```
+Uses Redis `SETEX`. Returns `{"status": "ok"}` on success.
+
+#### Proxy cache flow
+
+1. `resolve_node` returns `(endpoint, cache_ttl)`.
+2. If `cache_ttl` is non-None: compute cache key, call `GET /cache/{key}`.
+3. **Cache hit**: pass body through `_parse_remote_body()` (same command
+   detection as live responses); return result. No `node-enter`/`node-exit`
+   events emitted. OTEL span attribute `amaze.cache_hit=true` is set.
+4. **Cache miss**: emit `node-enter`, invoke node, parse body via
+   `_parse_remote_body()`, emit `node-exit`, call `PUT /cache/{key}`.
+
+#### Observability
+
+- Cache hits do **not** produce `node-enter`/`node-exit` run events.
+  The Redis event stream records only real invocations.
+- Cache hits are visible in OTEL via `amaze.cache_hit=true` on the
+  `amazegraph.invoke_remote` span.
+
+### 13.3 Updated Redis key schema
+
+| Key pattern | Type | Value | Lifecycle |
+|---|---|---|---|
+| `graph_node:{graph_id}:{node_name}` | string | JSON `{"endpoint":"...","registered_at":"ISO8601","cache_ttl":N}` (cache_ttl optional) | unchanged |
+| `cache:{32-hex-key}` | string | JSON wire response body `{"state_patch":{...}}` or `{"command":{...}}` | SETEX with node's `cache_ttl` seconds |
+
+The `cache:*` prefix does not collide with existing prefixes (`graph_node:*`,
+`graph:*`, `run:*`, `checkpoint:*`).

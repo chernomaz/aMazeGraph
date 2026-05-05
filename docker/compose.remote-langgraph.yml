@@ -34,6 +34,9 @@ services:
       A2A_NODE_HOST: 0.0.0.0
       A2A_NODE_PORT: "9002"
       A2A_NODE_PUBLIC_ENDPOINT: http://a2a-research:9002/invoke
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
     ports:
       - "9012:9002"
     depends_on:
@@ -58,6 +61,9 @@ services:
       A2A_NODE_HOST: 0.0.0.0
       A2A_NODE_PORT: "9003"
       A2A_NODE_PUBLIC_ENDPOINT: http://a2a-writer:9003/invoke
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
     ports:
       - "9013:9003"
     depends_on:
@@ -104,6 +110,9 @@ services:
       A2A_NODE_HOST: 0.0.0.0
       A2A_NODE_PORT: "9008"
       A2A_NODE_PUBLIC_ENDPOINT: http://a2a-s3:9008/invoke
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
     depends_on:
       orchestrator:
         condition: service_healthy
@@ -128,6 +137,9 @@ services:
       A2A_NODE_HOST: 0.0.0.0
       A2A_NODE_PORT: "9009"
       A2A_NODE_PUBLIC_ENDPOINT: http://a2a-s3-counter:9009/invoke
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
     depends_on:
       orchestrator:
         condition: service_healthy
@@ -152,6 +164,9 @@ services:
       A2A_NODE_HOST: 0.0.0.0
       A2A_NODE_PORT: "9010"
       A2A_NODE_PUBLIC_ENDPOINT: http://a2a-s3-schema:9010/invoke
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
     depends_on:
       orchestrator:
         condition: service_healthy
@@ -177,6 +192,9 @@ services:
       A2A_NODE_HOST: 0.0.0.0
       A2A_NODE_PORT: "9020"
       A2A_NODE_PUBLIC_ENDPOINT: http://a2a-planner:9020/invoke
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
     depends_on:
       orchestrator:
         condition: service_healthy
@@ -223,6 +241,9 @@ services:
       A2A_NODE_HOST: 0.0.0.0
       A2A_NODE_PORT: "9014"
       A2A_NODE_PUBLIC_ENDPOINT: http://a2a-send:9014/invoke
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
     depends_on:
       orchestrator:
         condition: service_healthy
@@ -248,6 +269,9 @@ services:
       A2A_NODE_HOST: 0.0.0.0
       A2A_NODE_PORT: "9015"
       A2A_NODE_PUBLIC_ENDPOINT: http://a2a-accumulator:9015/invoke
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
     depends_on:
       orchestrator:
         condition: service_healthy
@@ -273,6 +297,9 @@ services:
       A2A_NODE_HOST: 0.0.0.0
       A2A_NODE_PORT: "9011"
       A2A_NODE_PUBLIC_ENDPOINT: http://a2a-command:9011/invoke
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
     depends_on:
       orchestrator:
         condition: service_healthy
@@ -285,8 +312,9 @@ services:
   # Sprint 2 nodes ──────────────────────────────────────────────────────────
 
   a2a-llm-tool:
-    profiles: [sprint2]
-    # ST-RLG-9: real OpenAI ChatOpenAI + MCP web_search
+    profiles: [sprint2, sprint7]
+    # ST-RLG-9 (sprint2): real OpenAI ChatOpenAI + MCP web_search
+    # ST-RLG-28 (sprint7): LangSmith trace propagation
     build:
       context: ..
       dockerfile: docker/Dockerfile.a2a-node
@@ -301,10 +329,11 @@ services:
       A2A_NODE_PUBLIC_ENDPOINT: http://a2a-llm-tool:9004/invoke
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       MCP_URL: http://mcp:8000/mcp
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
     depends_on:
       orchestrator:
-        condition: service_healthy
-      mcp:
         condition: service_healthy
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9004/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
@@ -327,6 +356,9 @@ services:
       A2A_NODE_HOST: 0.0.0.0
       A2A_NODE_PORT: "9005"
       A2A_NODE_PUBLIC_ENDPOINT: http://a2a-audit:9005/invoke
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
     depends_on:
       orchestrator:
         condition: service_healthy
@@ -351,6 +383,9 @@ services:
       A2A_NODE_HOST: 0.0.0.0
       A2A_NODE_PORT: "9006"
       A2A_NODE_PUBLIC_ENDPOINT: http://a2a-research-a:9006/invoke
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
     depends_on:
       orchestrator:
         condition: service_healthy
@@ -375,6 +410,9 @@ services:
       A2A_NODE_HOST: 0.0.0.0
       A2A_NODE_PORT: "9007"
       A2A_NODE_PUBLIC_ENDPOINT: http://a2a-research-b:9007/invoke
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
     depends_on:
       orchestrator:
         condition: service_healthy
@@ -407,3 +445,31 @@ services:
       a2a-writer:
         condition: service_healthy
     restart: "no"
+
+  # Sprint 7 nodes ──────────────────────────────────────────────────────────
+
+  a2a-cached:
+    profiles: [sprint7]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.a2a-node
+      args:
+        NODE_MODULE: examples.a2a_nodes.cached_node
+    environment:
+      AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
+      OTEL_EXPORTER_OTLP_PROTOCOL: grpc
+      A2A_NODE_HOST: 0.0.0.0
+      A2A_NODE_PORT: "9017"
+      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-cached:9017/invoke
+      LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
+      LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
+      LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; r=urllib.request.urlopen('http://localhost:9017/healthz',timeout=2); sys.exit(0 if r.status==200 else 1)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30

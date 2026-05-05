@@ -80,6 +80,7 @@ class RegisterNodeRequest(BaseModel):
     graph_id: str = Field(min_length=1, max_length=128)
     node_name: str = Field(min_length=1, max_length=64, pattern=NODE_NAME_PATTERN)
     endpoint: str = Field(min_length=1, max_length=2048)
+    cache_ttl: int | None = None          # None means no caching
 
     @field_validator("graph_id")
     @classmethod
@@ -112,6 +113,7 @@ class ResolveNodeResponse(BaseModel):
     graph_id: str
     node_name: str
     endpoint: str
+    cache_ttl: int | None = None          # None means no caching
 
 
 class RegisterGraphRequest(BaseModel):
@@ -179,6 +181,16 @@ class HealthResponse(BaseModel):
     redis: Literal["ok"]
 
 
+class CacheGetResponse(BaseModel):
+    hit: bool
+    body: dict[str, Any] | None = None
+
+
+class CachePutRequest(BaseModel):
+    body: dict[str, Any]
+    ttl: int = Field(gt=0)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     redis_client = aioredis.from_url(REDIS_URL, decode_responses=True)
@@ -201,6 +213,10 @@ def _now_iso() -> str:
 
 def _node_key(graph_id: str, node_name: str) -> str:
     return f"graph_node:{graph_id}:{node_name}"
+
+
+def _cache_key(key: str) -> str:
+    return f"cache:{key}"
 
 
 def _graph_key(graph_id: str) -> str:
@@ -252,7 +268,10 @@ return new_status
 
 @app.post("/register/node", response_model=RegisterNodeResponse)
 async def register_node(req: RegisterNodeRequest, request: Request) -> RegisterNodeResponse:
-    payload = json.dumps({"endpoint": req.endpoint, "registered_at": _now_iso()})
+    data: dict = {"endpoint": req.endpoint, "registered_at": _now_iso()}
+    if req.cache_ttl is not None:
+        data["cache_ttl"] = req.cache_ttl
+    payload = json.dumps(data)
     try:
         await _redis(request).set(_node_key(req.graph_id, req.node_name), payload)
     except RedisError:
@@ -293,6 +312,7 @@ async def resolve_node(
         graph_id=graph_id,
         node_name=node_name,
         endpoint=data["endpoint"],
+        cache_ttl=data.get("cache_ttl"),
     )
 
 
@@ -407,6 +427,36 @@ async def get_run(
         events.append(item)
 
     return RunResponse(meta=RunMeta(**meta_data), events=events)
+
+
+CACHE_KEY_PATTERN = r"^[a-f0-9]{32,64}$"
+
+
+@app.get("/cache/{key}")
+async def get_cache(
+    request: Request,
+    key: str = Path(pattern=CACHE_KEY_PATTERN, max_length=64),
+) -> CacheGetResponse:
+    try:
+        raw = await _redis(request).get(_cache_key(key))
+    except RedisError:
+        raise HTTPException(status_code=503, detail="redis-error")
+    if raw is None:
+        return CacheGetResponse(hit=False)
+    return CacheGetResponse(hit=True, body=json.loads(raw))
+
+
+@app.put("/cache/{key}", status_code=200)
+async def put_cache(
+    req: CachePutRequest,
+    request: Request,
+    key: str = Path(pattern=CACHE_KEY_PATTERN, max_length=64),
+) -> dict[str, str]:
+    try:
+        await _redis(request).setex(_cache_key(key), req.ttl, json.dumps(req.body))
+    except RedisError:
+        raise HTTPException(status_code=503, detail="redis-error")
+    return {"status": "ok"}
 
 
 @app.get("/health")

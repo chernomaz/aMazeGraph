@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -86,6 +87,13 @@ class AmazeCommand:
     update: "dict | None" = None
 
 
+@dataclass
+class ResolvedNode:
+    """Endpoint and optional cache TTL returned by OrchestratorClient.resolve_node."""
+    endpoint: str
+    cache_ttl: int | None = None
+
+
 class InvalidCommand(AmazeGraphError):
     def __init__(self, graph_id: str, node_name: str, reason: str) -> None:
         super().__init__(
@@ -139,7 +147,7 @@ class OrchestratorClient:
                 f"register_graph failed: status={r.status_code} body={r.text[:512]}"
             )
 
-    async def resolve_node(self, graph_id: str, node_name: str) -> str:
+    async def resolve_node(self, graph_id: str, node_name: str) -> ResolvedNode:
         client = self._get_client()
         try:
             r = await client.get(f"/resolve/node/{graph_id}/{node_name}")
@@ -153,7 +161,8 @@ class OrchestratorClient:
             raise OrchestratorUnavailable(
                 f"resolve_node failed: status={r.status_code} body={r.text[:512]}"
             )
-        return r.json()["endpoint"]
+        data = r.json()
+        return ResolvedNode(endpoint=data["endpoint"], cache_ttl=data.get("cache_ttl"))
 
     async def emit_event(self, run_id: str, event: dict) -> None:
         client = self._get_client()
@@ -169,10 +178,65 @@ class OrchestratorClient:
         except Exception as exc:
             logger.warning("emit_event failed: run_id=%s err=%s", run_id, exc)
 
+    async def get_cache(self, key: str) -> dict | None:
+        """Return cached body dict, or None on miss."""
+        client = self._get_client()
+        try:
+            r = await client.get(f"/cache/{key}")
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("hit"):
+                    return data["body"]
+        except Exception as exc:
+            logger.warning("get_cache failed: key=%s err=%s", key, exc)
+        return None
+
+    async def put_cache(self, key: str, body: dict, ttl: int) -> None:
+        """Store body in cache with TTL seconds."""
+        client = self._get_client()
+        try:
+            await client.put(f"/cache/{key}", json={"body": body, "ttl": ttl})
+        except Exception as exc:
+            logger.warning("put_cache failed: key=%s err=%s", key, exc)
+
     async def close(self) -> None:
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+
+
+def _extract_langsmith_context(cfg: dict) -> dict | None:
+    """Extract LangSmith parent_run_id from LangGraph-injected callbacks.
+
+    Returns None when LangSmith is not enabled or callbacks carry no parent run.
+    Fully backward-compatible: the returned dict is added as an optional field
+    in the /invoke wire payload; remote nodes that don't understand it ignore it.
+    """
+    callbacks = cfg.get("callbacks")
+    if callbacks is None:
+        return None
+    parent_run_id = getattr(callbacks, "parent_run_id", None)
+    if parent_run_id is None:
+        return None
+    handlers = getattr(callbacks, "handlers", []) or []
+    project_name = os.environ.get("LANGCHAIN_PROJECT", "default")
+    for h in handlers:
+        if hasattr(h, "project_name"):
+            project_name = h.project_name
+            break
+    return {"parent_run_id": str(parent_run_id), "project_name": project_name}
+
+
+# run_id / trace_id are per-run tracking metadata injected by the driver,
+# not business state.  Excluding them ensures repeated calls with identical
+# business inputs share a cache entry even across different run IDs.
+_CACHE_KEY_EXCLUDE = frozenset({"run_id", "trace_id"})
+
+
+def _compute_cache_key(graph_id: str, node_name: str, state: dict) -> str:
+    state_for_key = {k: v for k, v in state.items() if k not in _CACHE_KEY_EXCLUDE}
+    raw = f"{graph_id}:{node_name}:{json.dumps(state_for_key, sort_keys=True, ensure_ascii=True)}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:32]
 
 
 class AmazeGraph:
@@ -289,6 +353,145 @@ class AmazeGraph:
             event["error_kind"] = error_kind
         return event
 
+    async def _parse_remote_body(
+        self,
+        body: dict,
+        node_name: str,
+        run_id: str | None,
+        trace_id: str | None,
+    ) -> "dict | LGCommand":
+        """Parse a wire response body (from live invocation or cache) into the
+        value LangGraph expects: a state-patch dict or LGCommand.
+
+        Identical validation runs for both cached and live responses so a
+        cached Command is reconstructed correctly rather than returned raw.
+        """
+        # ── Command detection (Cases 14 + 15) ──────────────────────
+        command_raw = body.get("command")
+        if command_raw is not None:
+            if not isinstance(command_raw, dict):
+                if run_id:
+                    await self.orchestrator.emit_event(
+                        run_id,
+                        self._make_event(
+                            "node-error", node_name, trace_id,
+                            status="error",
+                            error="invalid-command-shape",
+                            error_kind="proxy_block",
+                        ),
+                    )
+                raise InvalidCommand(self.graph_id, node_name, "command must be a dict")
+
+            goto_raw = command_raw.get("goto")
+            if not goto_raw and goto_raw != 0:
+                if run_id:
+                    await self.orchestrator.emit_event(
+                        run_id,
+                        self._make_event(
+                            "node-error", node_name, trace_id,
+                            status="error",
+                            error="invalid-command-empty-goto",
+                            error_kind="proxy_block",
+                        ),
+                    )
+                raise InvalidCommand(
+                    self.graph_id, node_name, "command.goto is required and non-empty"
+                )
+
+            if isinstance(goto_raw, str):
+                reconstructed = [goto_raw]
+                scalar = True
+            elif isinstance(goto_raw, dict) and goto_raw.get("__send__"):
+                reconstructed = [LGSend(goto_raw["node"], goto_raw["arg"])]
+                scalar = False
+            elif isinstance(goto_raw, list):
+                reconstructed = [
+                    LGSend(item["node"], item["arg"])
+                    if isinstance(item, dict) and item.get("__send__")
+                    else item
+                    for item in goto_raw
+                ]
+                scalar = False
+            else:
+                if run_id:
+                    await self.orchestrator.emit_event(
+                        run_id,
+                        self._make_event(
+                            "node-error", node_name, trace_id,
+                            status="error",
+                            error=f"invalid-command-goto-type:{type(goto_raw).__name__}",
+                            error_kind="proxy_block",
+                        ),
+                    )
+                raise InvalidCommand(
+                    self.graph_id, node_name,
+                    f"command.goto must be str or list, got {type(goto_raw).__name__}",
+                )
+
+            known = set(self._nodes) | {"__end__"}
+            for item in reconstructed:
+                target_name = item.node if isinstance(item, LGSend) else item
+                if target_name not in known:
+                    if run_id:
+                        await self.orchestrator.emit_event(
+                            run_id,
+                            self._make_event(
+                                "node-error", node_name, trace_id,
+                                status="error",
+                                error=f"unknown-goto-target:{target_name}",
+                                error_kind="proxy_block",
+                            ),
+                        )
+                    raise InvalidCommand(
+                        self.graph_id, node_name,
+                        f"command.goto target {target_name!r} not in graph",
+                    )
+
+            update_patch = command_raw.get("update") or {}
+            if not isinstance(update_patch, dict):
+                if run_id:
+                    await self.orchestrator.emit_event(
+                        run_id,
+                        self._make_event(
+                            "node-error", node_name, trace_id,
+                            status="error",
+                            error="invalid-command-update-type",
+                            error_kind="proxy_block",
+                        ),
+                    )
+                raise InvalidCommand(
+                    self.graph_id, node_name, "command.update must be a dict"
+                )
+
+            if run_id:
+                await self.orchestrator.emit_event(
+                    run_id,
+                    self._make_event("node-exit", node_name, trace_id, status="ok"),
+                )
+            return LGCommand(update=update_patch, goto=goto_raw if scalar else reconstructed)
+
+        # ── State-patch path ─────────────────────────────────────────
+        state_patch = body.get("state_patch")
+        if not isinstance(state_patch, dict):
+            if run_id:
+                await self.orchestrator.emit_event(
+                    run_id,
+                    self._make_event(
+                        "node-error", node_name, trace_id,
+                        status="error",
+                        error="invalid-state-patch",
+                        error_kind="node_error",
+                    ),
+                )
+            raise InvalidStatePatch(self.graph_id, node_name, body)
+
+        if run_id:
+            await self.orchestrator.emit_event(
+                run_id,
+                self._make_event("node-exit", node_name, trace_id, status="ok"),
+            )
+        return state_patch
+
     def _make_remote_proxy(
         self, node_name: str
     ) -> Callable[..., Awaitable[Any]]:
@@ -340,6 +543,8 @@ class AmazeGraph:
             }
             config_subset = {k: v for k, v in config_subset_raw.items() if v is not None}
 
+            langsmith_ctx = _extract_langsmith_context(cfg)
+
             logger.info("▶ [%s] invoking remote node (graph=%s)", node_name, self.graph_id)
             tracer = trace.get_tracer(__name__)
             with tracer.start_as_current_span("amazegraph.invoke_remote") as span:
@@ -351,7 +556,7 @@ class AmazeGraph:
                     span.set_attribute("amaze.trace_id", trace_id)
 
                 try:
-                    endpoint = await self.orchestrator.resolve_node(
+                    resolved = await self.orchestrator.resolve_node(
                         self.graph_id, node_name
                     )
                 except RemoteNodeNotRegistered as exc:
@@ -369,6 +574,19 @@ class AmazeGraph:
                         )
                     raise
 
+                cache_key: str | None = None
+                if resolved.cache_ttl is not None:
+                    cache_key = _compute_cache_key(self.graph_id, node_name, state)
+                    cached_body = await self.orchestrator.get_cache(cache_key)
+                    if cached_body is not None:
+                        span.set_attribute("amaze.cache_hit", True)
+                        logger.info("◀ [%s] cache hit (graph=%s)", node_name, self.graph_id)
+                        # run_id=None suppresses all Redis stream events on cache hit —
+                        # cache hits are observable via amaze.cache_hit OTEL attribute only
+                        return await self._parse_remote_body(
+                            cached_body, node_name, None, None
+                        )
+
                 if run_id:
                     await self.orchestrator.emit_event(
                         run_id,
@@ -383,11 +601,12 @@ class AmazeGraph:
                     "state": state,
                     "config": config_subset,
                     "runtime_context": runtime_context,
+                    "langsmith_context": langsmith_ctx,
                 }
 
                 client = self._get_http_client()
                 try:
-                    response = await client.post(endpoint, json=payload)
+                    response = await client.post(resolved.endpoint, json=payload)
                 except httpx.TimeoutException as exc:
                     if run_id:
                         await self.orchestrator.emit_event(
@@ -458,144 +677,10 @@ class AmazeGraph:
                         self.graph_id, node_name, response.text
                     ) from exc
 
-                # ── Command detection (Cases 14 + 15) ──────────────────────
-                command_raw = body.get("command")
-                if command_raw is not None:
-                    if not isinstance(command_raw, dict):
-                        if run_id:
-                            await self.orchestrator.emit_event(
-                                run_id,
-                                self._make_event(
-                                    "node-error", node_name, trace_id,
-                                    status="error",
-                                    error="invalid-command-shape",
-                                    error_kind="proxy_block",
-                                ),
-                            )
-                        raise InvalidCommand(
-                            self.graph_id, node_name,
-                            "command must be a dict"
-                        )
-
-                    goto_raw = command_raw.get("goto")
-                    if not goto_raw and goto_raw != 0:
-                        if run_id:
-                            await self.orchestrator.emit_event(
-                                run_id,
-                                self._make_event(
-                                    "node-error", node_name, trace_id,
-                                    status="error",
-                                    error="invalid-command-empty-goto",
-                                    error_kind="proxy_block",
-                                ),
-                            )
-                        raise InvalidCommand(
-                            self.graph_id, node_name,
-                            "command.goto is required and non-empty"
-                        )
-
-                    if isinstance(goto_raw, str):
-                        reconstructed = [goto_raw]
-                        scalar = True
-                    elif isinstance(goto_raw, dict) and goto_raw.get("__send__"):
-                        reconstructed = [LGSend(goto_raw["node"], goto_raw["arg"])]
-                        scalar = False
-                    elif isinstance(goto_raw, list):
-                        reconstructed = [
-                            LGSend(item["node"], item["arg"])
-                            if isinstance(item, dict) and item.get("__send__")
-                            else item
-                            for item in goto_raw
-                        ]
-                        scalar = False
-                    else:
-                        if run_id:
-                            await self.orchestrator.emit_event(
-                                run_id,
-                                self._make_event(
-                                    "node-error", node_name, trace_id,
-                                    status="error",
-                                    error=f"invalid-command-goto-type:{type(goto_raw).__name__}",
-                                    error_kind="proxy_block",
-                                ),
-                            )
-                        raise InvalidCommand(
-                            self.graph_id, node_name,
-                            f"command.goto must be str or list, got {type(goto_raw).__name__}"
-                        )
-
-                    known = set(self._nodes) | {"__end__"}
-                    for item in reconstructed:
-                        target_name = item.node if isinstance(item, LGSend) else item
-                        if target_name not in known:
-                            if run_id:
-                                await self.orchestrator.emit_event(
-                                    run_id,
-                                    self._make_event(
-                                        "node-error", node_name, trace_id,
-                                        status="error",
-                                        error=f"unknown-goto-target:{target_name}",
-                                        error_kind="proxy_block",
-                                    ),
-                                )
-                            raise InvalidCommand(
-                                self.graph_id, node_name,
-                                f"command.goto target {target_name!r} not in graph"
-                            )
-
-                    update_patch = command_raw.get("update") or {}
-                    if not isinstance(update_patch, dict):
-                        if run_id:
-                            await self.orchestrator.emit_event(
-                                run_id,
-                                self._make_event(
-                                    "node-error", node_name, trace_id,
-                                    status="error",
-                                    error="invalid-command-update-type",
-                                    error_kind="proxy_block",
-                                ),
-                            )
-                        raise InvalidCommand(
-                            self.graph_id, node_name,
-                            "command.update must be a dict"
-                        )
-
-                    if run_id:
-                        await self.orchestrator.emit_event(
-                            run_id,
-                            self._make_event(
-                                "node-exit", node_name, trace_id, status="ok"
-                            ),
-                        )
-
-                    # Send.arg must be JSON-serializable (same contract as state_patch)
-                    return LGCommand(update=update_patch, goto=goto_raw if scalar else reconstructed)
-
-                # ── Existing state_patch path (unchanged) ───────────────────
-                state_patch = body.get("state_patch")
-                if not isinstance(state_patch, dict):
-                    if run_id:
-                        await self.orchestrator.emit_event(
-                            run_id,
-                            self._make_event(
-                                "node-error",
-                                node_name,
-                                trace_id,
-                                status="error",
-                                error="invalid-state-patch",
-                                error_kind="node_error",
-                            ),
-                        )
-                    raise InvalidStatePatch(self.graph_id, node_name, body)
-
-                if run_id:
-                    await self.orchestrator.emit_event(
-                        run_id,
-                        self._make_event(
-                            "node-exit", node_name, trace_id, status="ok"
-                        ),
-                    )
-                return state_patch
+                result = await self._parse_remote_body(body, node_name, run_id, trace_id)
+                if cache_key is not None and resolved.cache_ttl is not None:
+                    await self.orchestrator.put_cache(cache_key, body, resolved.cache_ttl)
+                return result
 
         return remote_proxy
 

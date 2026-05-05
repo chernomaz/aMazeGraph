@@ -98,6 +98,7 @@ class InvokeRequest(BaseModel):
     state: dict[str, Any]
     config: dict[str, Any] = {}
     runtime_context: dict[str, Any] = {}
+    langsmith_context: dict[str, Any] | None = None
 
 
 class InvokeResponse(BaseModel):
@@ -149,7 +150,7 @@ async def _unregister_best_effort(orchestrator_url: str, body: dict) -> None:
         )
 
 
-_REGISTERED_HANDLERS: list[tuple[str, str, NodeHandler]] = []
+_REGISTERED_HANDLERS: list[tuple[str, str, NodeHandler, int | None]] = []
 
 
 def _handler_accepts_runtime(handler: NodeHandler) -> bool:
@@ -182,7 +183,7 @@ def _handler_accepts_runtime(handler: NodeHandler) -> bool:
     return False
 
 
-def remote_node(*, graph_id: str, node_name: str):
+def remote_node(*, graph_id: str, node_name: str, cache_ttl: int | None = None):
     """Decorator that registers an async handler as a remote node.
 
     Multiple handlers may be decorated in a single Python process; serve_node()
@@ -191,7 +192,7 @@ def remote_node(*, graph_id: str, node_name: str):
     """
 
     def wrapper(handler: NodeHandler) -> NodeHandler:
-        _REGISTERED_HANDLERS.append((graph_id, node_name, handler))
+        _REGISTERED_HANDLERS.append((graph_id, node_name, handler, cache_ttl))
         return handler
 
     return wrapper
@@ -199,18 +200,20 @@ def remote_node(*, graph_id: str, node_name: str):
 
 def _build_handlers_app(
     *,
-    handlers: list[tuple[str, str, NodeHandler]],
+    handlers: list[tuple[str, str, NodeHandler, int | None]],
     orchestrator_url: str,
     public_endpoint: str,
     service_name: str,
 ) -> FastAPI:
     handlers_map: dict[tuple[str, str], NodeHandler] = {
-        (gid, nname): h for gid, nname, h in handlers
+        (gid, nname): h for gid, nname, h, _ttl in handlers
     }
-    register_bodies = [
-        {"graph_id": gid, "node_name": nname, "endpoint": public_endpoint}
-        for gid, nname, _ in handlers
-    ]
+    register_bodies = []
+    for gid, nname, _, ttl in handlers:
+        body: dict[str, Any] = {"graph_id": gid, "node_name": nname, "endpoint": public_endpoint}
+        if ttl is not None:
+            body["cache_ttl"] = ttl
+        register_bodies.append(body)
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -261,11 +264,36 @@ def _build_handlers_app(
                 status_code=404,
                 detail=f"no handler registered for graph_id={req.graph_id} node_name={req.node_name}",
             )
+        handler_config = dict(req.config)
+        if req.langsmith_context and req.langsmith_context.get("parent_run_id"):
+            try:
+                import uuid as _uuid
+                from langchain_core.callbacks import CallbackManager
+                from langchain_core.tracers.langchain import LangChainTracer
+                _parent_run_id = _uuid.UUID(req.langsmith_context["parent_run_id"])
+                # LangChainTracer does not accept parent_run_id in its constructor;
+                # parent_run_id must be set on the CallbackManager so it is passed
+                # as parent_run_id in on_llm_start / on_chain_start callbacks.
+                _tracer = LangChainTracer(
+                    project_name=req.langsmith_context.get("project_name"),
+                )
+                _cb_manager = CallbackManager(
+                    handlers=[_tracer],
+                    parent_run_id=_parent_run_id,
+                )
+                handler_config["callbacks"] = _cb_manager
+                logger.info(
+                    "LangSmith parent_run_id=%s project=%s",
+                    req.langsmith_context["parent_run_id"],
+                    req.langsmith_context.get("project_name"),
+                )
+            except Exception as _exc:
+                logger.debug("LangSmith tracer setup skipped: %s", _exc)
         if _handler_accepts_runtime(handler):
             runtime = Runtime(req.runtime_context or {})
-            result = await handler(req.state, req.config, runtime)
+            result = await handler(req.state, handler_config, runtime)
         else:
-            result = await handler(req.state, req.config)
+            result = await handler(req.state, handler_config)
         # langgraph.types.Command return → translate to wire {"command": {...}} (Cases 14+15).
         # isinstance check is collision-safe: plain dicts (even with a "command" key)
         # always go through the state_patch path below.
@@ -289,7 +317,7 @@ def _build_handlers_app(
         return {
             "status": "ok",
             "handlers": [
-                {"graph_id": gid, "node_name": nname} for gid, nname, _ in handlers
+                {"graph_id": gid, "node_name": nname} for gid, nname, _, _ttl in handlers
             ],
         }
 
@@ -334,7 +362,7 @@ def serve_node(
     )
 
     service_name = os.environ.get("OTEL_SERVICE_NAME") or (
-        "a2a-" + "-".join(sorted({n for _, n, _ in _REGISTERED_HANDLERS}))
+        "a2a-" + "-".join(sorted({n for _, n, _, _ in _REGISTERED_HANDLERS}))
     )
     setup_logging(service_name)
 

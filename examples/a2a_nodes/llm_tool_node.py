@@ -54,7 +54,7 @@ async def llm_tool_handler(state: dict, config: dict) -> dict:
             llm_with_tools = model.bind_tools(tools)
 
             first_response = await llm_with_tools.ainvoke(
-                [{"role": "human", "content": prompt}]
+                [{"role": "human", "content": prompt}], config=config
             )
 
             tool_result = ""
@@ -93,7 +93,7 @@ async def llm_tool_handler(state: dict, config: dict) -> dict:
                         }
                     )
 
-                final_response = await llm_with_tools.ainvoke(tool_results_messages)
+                final_response = await llm_with_tools.ainvoke(tool_results_messages, config=config)
                 final_response_content = final_response.content or ""
             else:
                 final_response_content = first_response.content or ""
@@ -104,7 +104,7 @@ async def llm_tool_handler(state: dict, config: dict) -> dict:
         tool_result = "[mcp_unavailable]"
 
         plain_response = await model.ainvoke(
-            [{"role": "human", "content": prompt}]
+            [{"role": "human", "content": prompt}], config=config
         )
         final_response_content = plain_response.content or ""
 

@@ -391,3 +391,45 @@ def research_with_env():
             )
         except Exception:
             pass
+
+
+@pytest.fixture(scope="session")
+def sprint7_stack(compose_stack) -> None:
+    """Extend compose_stack with Sprint 7 services: a2a-cached (cache test) and
+    a2a-llm-tool (LangSmith trace test). Waits for node registration."""
+    if os.environ.get("AMAZEGRAPH_SKIP_COMPOSE") == "1":
+        return
+    _compose(
+        "up", "-d", "--build",
+        "--profile", "sprint7",
+        "a2a-llm-tool",
+        check=True,
+        timeout=900,
+    )
+    for node_name in ("cached_node", "llm_tool"):
+        deadline = time.time() + 120.0
+        while time.time() < deadline:
+            try:
+                r = httpx.get(
+                    f"{ORCHESTRATOR_URL}/resolve/node/demo_graph_v1/{node_name}",
+                    timeout=2.0,
+                )
+                if r.status_code == 200:
+                    break
+            except Exception:
+                pass
+            time.sleep(1.0)
+        else:
+            raise RuntimeError(f"S7 node '{node_name}' did not register within 120s")
+
+
+@pytest.fixture(scope="session")
+def sprint7_demo(sprint7_stack) -> subprocess.CompletedProcess:
+    """Run the full Sprint 7 demo once; shared across ST-RLG-28..31."""
+    cmd = [
+        "docker", "compose",
+        "-p", PROJECT,
+        "-f", str(COMPOSE_FILE),
+        "run", "--rm", "main-langgraph",
+    ]
+    return subprocess.run(cmd, capture_output=True, text=True, timeout=300)

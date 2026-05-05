@@ -17,6 +17,7 @@ Scenarios executed sequentially:
 import asyncio
 import logging
 import operator
+import os
 import sys
 from datetime import datetime, timezone
 from typing import Annotated, Any, TypedDict
@@ -75,6 +76,8 @@ class GraphState(TypedDict, total=False):
     # Sprint 6: thread persistence via checkpointing (S18)
     visits: int                     # incremented by accumulator on each turn
     log: Annotated[list[str], operator.add]  # appended per turn by accumulator
+    # Sprint 7: cache demo (S20/S21/S22)
+    cached_result: str              # returned by cached_node; embeds timestamp
 
 
 # Sprint 3 — Schema split state schemas (case #28, ST-RLG-18)
@@ -929,14 +932,166 @@ async def scenario_s18_checkpointer(checkpointer) -> dict:
     return result2
 
 
+# ── Scenario S19: LangSmith trace propagation ─────────────────────────────────
+
+
+async def scenario_s19_langsmith_trace() -> dict:
+    """Invoke llm_tool node with LangSmith tracing active.
+
+    Demonstrates that parent_run_id is extracted from the driver's
+    CallbackManager and sent to the remote node via the wire
+    `langsmith_context` field.  The remote node reconstructs a
+    LangChainTracer with the correct parent_run_id before calling the LLM,
+    so LLM spans appear nested under the graph root in LangSmith.
+    """
+    logger.info("═══ S19: LangSmith trace propagation ═══")
+    langsmith_enabled = os.environ.get("LANGCHAIN_TRACING_V2", "false").lower() == "true"
+    if not langsmith_enabled:
+        logger.info("S19: LANGCHAIN_TRACING_V2 not set — langsmith_context will be None on wire")
+    wf = _make_workflow()
+    wf.add_node("start", start_node)
+    wf.remote_node("llm_tool")
+    wf.set_entry_point("start")
+    wf.add_edge("start", "llm_tool")
+    wf.add_edge("llm_tool", END)
+
+    result = await _invoke(
+        wf,
+        {"user_request": "What is LangGraph and how does it handle remote node execution?"},
+        run_id="run-s19",
+        trace_id="trace-s19",
+    )
+    logger.info("S19 tool_result: %s", (result.get("tool_result") or "")[:120])
+    logger.info("S19 messages count: %d", len(result.get("messages") or []))
+    return result
+
+
+# ── Scenario S20: Cache hit ───────────────────────────────────────────────────
+
+
+async def scenario_s20_cache_hit() -> dict:
+    """Two calls with identical state within TTL window → second is a cache hit.
+
+    Demonstrates orchestrator-side Redis cache (Case 22, ST-RLG-29).
+    Both calls must return the identical cached_result string — the embedded
+    timestamp proves the node was not re-invoked.
+    """
+    logger.info("═══ S20: cache hit (same input within TTL=2s) ═══")
+    input_val = "cache-hit-test"
+
+    async def _run_cached(run_suffix: str) -> dict:
+        wf = _make_workflow()
+        wf.remote_node("cached_node")
+        wf.set_entry_point("cached_node")
+        wf.add_edge("cached_node", END)
+        return await _invoke(
+            wf,
+            {"input": input_val},
+            run_id=f"run-s20-{run_suffix}",
+            trace_id=f"trace-s20-{run_suffix}",
+        )
+
+    result1 = await _run_cached("first")
+    result2 = await _run_cached("second")
+
+    ts1 = result1.get("cached_result", "")
+    ts2 = result2.get("cached_result", "")
+    logger.info("S20 first  cached_result: %s", ts1)
+    logger.info("S20 second cached_result: %s", ts2)
+    logger.info("S20 cache hit verified (strings equal): %s", ts1 == ts2)
+    return {"cached_result_1": ts1, "cached_result_2": ts2, "cache_hit": ts1 == ts2}
+
+
+# ── Scenario S21: TTL expiry ──────────────────────────────────────────────────
+
+
+async def scenario_s21_ttl_expiry() -> dict:
+    """First call, sleep 3s (TTL=2s), third call — expiry produces a fresh result.
+
+    Demonstrates that cache entries expire after TTL seconds (ST-RLG-30).
+    Pass condition: first and third cached_result strings differ.
+    """
+    logger.info("═══ S21: TTL expiry (sleep 3s > TTL=2s) ═══")
+    input_val = "ttl-expiry-test"
+
+    async def _run_cached(run_suffix: str) -> dict:
+        wf = _make_workflow()
+        wf.remote_node("cached_node")
+        wf.set_entry_point("cached_node")
+        wf.add_edge("cached_node", END)
+        return await _invoke(
+            wf,
+            {"input": input_val},
+            run_id=f"run-s21-{run_suffix}",
+            trace_id=f"trace-s21-{run_suffix}",
+        )
+
+    result1 = await _run_cached("first")
+    logger.info("S21 sleeping 3s to outlast TTL=2s ...")
+    await asyncio.sleep(3)
+    result3 = await _run_cached("third")
+
+    ts1 = result1.get("cached_result", "")
+    ts3 = result3.get("cached_result", "")
+    logger.info("S21 first cached_result:  %s", ts1)
+    logger.info("S21 third cached_result:  %s", ts3)
+    logger.info("S21 expiry verified (strings differ): %s", ts1 != ts3)
+    return {"cached_result_1": ts1, "cached_result_3": ts3, "expiry_verified": ts1 != ts3}
+
+
+# ── Scenario S22: Key scoping ─────────────────────────────────────────────────
+
+
+async def scenario_s22_key_scoping() -> dict:
+    """Different state inputs → different cache keys; repeat first → cache hit.
+
+    Demonstrates that the cache key is scoped by state, so two calls with
+    different `input` values do not share a cached entry, but a third call
+    that repeats the first input (within TTL) IS a cache hit (ST-RLG-31).
+    """
+    logger.info("═══ S22: key scoping (different states → different cache keys) ═══")
+
+    async def _run_cached(input_val: str, run_suffix: str) -> dict:
+        wf = _make_workflow()
+        wf.remote_node("cached_node")
+        wf.set_entry_point("cached_node")
+        wf.add_edge("cached_node", END)
+        return await _invoke(
+            wf,
+            {"input": input_val},
+            run_id=f"run-s22-{run_suffix}",
+            trace_id=f"trace-s22-{run_suffix}",
+        )
+
+    result_a1 = await _run_cached("scope-input-A", "a1")
+    result_b  = await _run_cached("scope-input-B", "b")
+    result_a2 = await _run_cached("scope-input-A", "a2")  # within TTL → cache hit
+
+    ts_a1 = result_a1.get("cached_result", "")
+    ts_b  = result_b.get("cached_result", "")
+    ts_a2 = result_a2.get("cached_result", "")
+
+    diff_inputs  = ts_a1 != ts_b
+    same_repeat  = ts_a1 == ts_a2
+    logger.info("S22 input-A first:  %s", ts_a1)
+    logger.info("S22 input-B:        %s", ts_b)
+    logger.info("S22 input-A repeat: %s", ts_a2)
+    logger.info("S22 different inputs → different results: %s", diff_inputs)
+    logger.info("S22 repeat within TTL → cache hit:        %s", same_repeat)
+    return {
+        "ts_a1": ts_a1, "ts_b": ts_b, "ts_a2": ts_a2,
+        "diff_inputs": diff_inputs, "same_repeat": same_repeat,
+    }
+
+
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 
 async def main_async() -> int:
     tracer = trace.get_tracer("main-langgraph")
 
-    with tracer.start_as_current_span("main-langgraph.sprint6-demo") as span:
-        span.set_attribute("amaze.scenarios", "S1,S2,S3,S4a,S4b,S5,S6,S7,S8,S9,S10,S11,S11b,S12,S13,S14,S15,S16,S17,S18")
+    with tracer.start_as_current_span("main-langgraph.sprint7-demo") as span:
+        span.set_attribute("amaze.scenarios", "S1,S2,S3,S4a,S4b,S5,S6,S7,S8,S9,S10,S11,S11b,S12,S13,S14,S15,S16,S17,S18,S19,S20,S21,S22")
 
         outcomes: dict[str, str] = {}
 
@@ -1189,8 +1344,53 @@ async def main_async() -> int:
             logger.error("S18 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S18"] = f"FAILED: {type(exc).__name__}: {exc}"
 
+        # S19 — LangSmith trace propagation (Sprint 7)
+        try:
+            r = await scenario_s19_langsmith_trace()
+            outcomes["S19"] = "ok" if r.get("tool_result") else "no-tool_result"
+        except RemoteNodeNotRegistered:
+            outcomes["S19"] = "SKIP: llm_tool node not running"
+            logger.warning("S19: llm_tool node not registered — is a2a-llm-tool running?")
+        except Exception as exc:
+            logger.error("S19 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S19"] = f"FAILED: {type(exc).__name__}: {exc}"
+
+        # S20 — cache hit (Sprint 7 Case 22)
+        try:
+            r = await scenario_s20_cache_hit()
+            outcomes["S20"] = "ok (cache hit)" if r.get("cache_hit") else f"MISS: result1={r.get('cached_result_1')!r} result2={r.get('cached_result_2')!r}"
+        except RemoteNodeNotRegistered:
+            outcomes["S20"] = "SKIP: cached_node not running"
+            logger.warning("S20: cached_node not registered — is a2a-cached running?")
+        except Exception as exc:
+            logger.error("S20 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S20"] = f"FAILED: {type(exc).__name__}: {exc}"
+
+        # S21 — TTL expiry (Sprint 7)
+        try:
+            r = await scenario_s21_ttl_expiry()
+            outcomes["S21"] = "ok (TTL expired)" if r.get("expiry_verified") else f"NOT EXPIRED: result1={r.get('cached_result_1')!r} result3={r.get('cached_result_3')!r}"
+        except RemoteNodeNotRegistered:
+            outcomes["S21"] = "SKIP: cached_node not running"
+            logger.warning("S21: cached_node not registered — is a2a-cached running?")
+        except Exception as exc:
+            logger.error("S21 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S21"] = f"FAILED: {type(exc).__name__}: {exc}"
+
+        # S22 — key scoping (Sprint 7)
+        try:
+            r = await scenario_s22_key_scoping()
+            ok = r.get("diff_inputs") and r.get("same_repeat")
+            outcomes["S22"] = "ok (scoping verified)" if ok else f"UNEXPECTED diff_inputs={r.get('diff_inputs')} same_repeat={r.get('same_repeat')}"
+        except RemoteNodeNotRegistered:
+            outcomes["S22"] = "SKIP: cached_node not running"
+            logger.warning("S22: cached_node not registered — is a2a-cached running?")
+        except Exception as exc:
+            logger.error("S22 failed [%s]: %s", type(exc).__name__, exc)
+            outcomes["S22"] = f"FAILED: {type(exc).__name__}: {exc}"
+
         # Summary
-        logger.info("═══ Sprint 6 demo summary ═══")
+        logger.info("═══ Sprint 7 demo summary ═══")
         all_ok = True
         for scenario, status in outcomes.items():
             prefix = "✓" if status.startswith("ok") else ("⚠" if status.startswith("SKIP") else "✗")
