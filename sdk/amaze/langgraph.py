@@ -284,6 +284,7 @@ class AmazeGraph:
         self.remote_nodes.add(name)
         self._nodes.append(name)
         proxy = self._make_sync_remote_proxy(name) if self._sync else self._make_remote_proxy(name)
+        logger.info("remote_node %r registered as %s proxy (sync=%s)", name, "sync" if self._sync else "async", self._sync)
         self.graph.add_node(name, proxy)
         return self
 
