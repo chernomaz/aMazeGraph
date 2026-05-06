@@ -610,7 +610,7 @@ class AmazeGraph:
         return state_patch
 
     def _make_sync_remote_proxy(self, node_name: str) -> Callable[..., Any]:
-        def remote_proxy(state: dict, config: RunnableConfig | None = None) -> dict:
+        def remote_proxy(state: dict, config=None) -> dict:
             try:
                 from langgraph.config import get_config as _lg_get_config
                 _ctx_cfg = _lg_get_config()
