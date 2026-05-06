@@ -8,17 +8,17 @@ For distributed nodes, use `remote_node(...)`.
 No changes to node business logic. One graph-level change to opt into remote execution.
 
 ```python
-from amaze_graph import AmazeGraph
+from sdk.amaze import AmazeGraph
 
-graph = AmazeGraph(State)
+builder = AmazeGraph(State, graph_id="my_graph", orchestrator_url="http://localhost:8011")
 
-graph.add_node("local_step", local_step)
-graph.remote_node("remote_research", endpoint="research-service")
+builder.add_node("local_step", local_step)
+builder.remote_node("remote_research")  # endpoint resolved via orchestrator
 
-graph.add_edge("local_step", "remote_research")
-graph.add_edge("remote_research", END)
+builder.add_edge("local_step", "remote_research")
+builder.add_edge("remote_research", END)
 
-app = graph.compile()
+app = builder.compile()
 ```
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
