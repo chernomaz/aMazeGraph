@@ -14,6 +14,13 @@ from sdk.amaze import remote_node, serve_node
 GRAPH_ID = "advanced_demo"
 
 logger = logging.getLogger(__name__)
+
+import json
+from dotenv import load_dotenv
+logger = logging.getLogger(__name__)
+GRAPH_ID = "advanced_demo"
+load_dotenv()
+
 llm = ChatOpenAI(model="gpt-4.1-mini", temperature=0)
 
 
