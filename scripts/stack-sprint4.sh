@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # stack-sprint4.sh — stop all aMaze containers, start only what Sprint 4 tests need.
 #
-# Brings up:  orchestrator  a2a-command
+# Brings up:  orchestrator  remote-command
 # Sufficient for: ST-RLG-19..22 (test_sprint4.py)
 # S1-S10 will SKIP gracefully (no research/writer nodes required).
 #
@@ -46,8 +46,8 @@ echo "==> Building main-langgraph image..."
 $DC build main-langgraph
 
 echo ""
-echo "==> Building and starting: orchestrator, a2a-writer, a2a-command..."
-$DC up -d --build orchestrator a2a-writer a2a-command
+echo "==> Building and starting: orchestrator, remote-writer, remote-command..."
+$DC up -d --build orchestrator remote-writer remote-command
 
 # ── Wait for health ───────────────────────────────────────────────────────────
 
@@ -65,10 +65,10 @@ wait_url() {
 }
 
 wait_url "http://localhost:8011/health"   "orchestrator"
-wait_url "http://localhost:9013/healthz" "a2a-writer"
+wait_url "http://localhost:9013/healthz" "remote-writer"
 
-# a2a-command has no host port; poll via orchestrator
-printf "   %-36s" "a2a-command (via orchestrator)"
+# remote-command has no host port; poll via orchestrator
+printf "   %-36s" "remote-command (via orchestrator)"
 DEADLINE=$((SECONDS + 90))
 until curl -sf "http://localhost:8011/resolve/node/demo_graph_v1/command" > /dev/null 2>&1; do
     if [ $SECONDS -ge $DEADLINE ]; then echo " TIMEOUT"; exit 1; fi

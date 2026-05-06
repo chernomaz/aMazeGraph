@@ -31,5 +31,5 @@ async def send_handler(state: dict, config: dict) -> Command:
 
 
 if __name__ == "__main__":
-    setup_logging("a2a-send")
+    setup_logging("remote-send")
     serve_node()

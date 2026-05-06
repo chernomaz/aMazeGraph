@@ -1,6 +1,25 @@
-# aMazeGraph
+# AmazeGraph
 
-**Run any LangGraph node as a standalone service on a different host — zero changes to your graph logic.**
+AmazeGraph extends LangGraph with one additional capability: running selected graph nodes remotely.
+
+Existing LangGraph nodes, edges, state, reducers, conditional routing, and compile/invoke flow stay the same.  
+For local nodes, continue using `add_node(...)`.  
+For distributed nodes, use `remote_node(...)`.  
+No changes to node business logic. One graph-level change to opt into remote execution.
+
+```python
+from amaze_graph import AmazeGraph
+
+graph = AmazeGraph(State)
+
+graph.add_node("local_step", local_step)
+graph.remote_node("remote_research", endpoint="research-service")
+
+graph.add_edge("local_step", "remote_research")
+graph.add_edge("remote_research", END)
+
+app = graph.compile()
+```
 
 ![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue)
 ![License Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-green)
@@ -72,8 +91,6 @@ from typing import TypedDict
 class MyState(TypedDict):
     query: str
     result: str
-    run_id: str     # required: identifies the run in the event stream
-    trace_id: str   # required: correlates distributed traces
 
 builder = AmazeGraph(MyState, graph_id="my_graph",
                      orchestrator_url="http://localhost:8011")
@@ -82,6 +99,9 @@ builder.set_entry_point("researcher")
 builder.add_edge("researcher", END)
 app = builder.compile()
 
+# run_id / trace_id are optional observability fields — pass them to get a
+# run event log in the orchestrator and amaze.run_id on OTel spans.
+# The graph executes correctly without them.
 result = await app.ainvoke({"query": "LangGraph remoting",
                             "run_id": "run-1", "trace_id": "trace-1"})
 ```
@@ -106,19 +126,15 @@ See [Docker quick start](#docker-quick-start) or [running a node without Docker]
 
 ## Architecture
 
-```
-┌────────────────────────┐   HTTP POST /invoke   ┌──────────────────────────┐
-│  Driver Process        │ ────────────────────▶ │  Remote Node Service     │
-│  (LangGraph native)    │ ◀──── state_patch ──── │  (@remote_node)          │
-│  AmazeGraph            │                       └──────────────────────────┘
-│  compile() / ainvoke() │
-└──────────┬─────────────┘
-           │  register / resolve node endpoint
-           ▼
-┌────────────────────────┐
-│  Orchestrator          │  ← Redis  (node registry + run event stream)
-│  (FastAPI :8001)       │  ← Jaeger (distributed traces, UI :16686)
-└────────────────────────┘
+```text
+                 register / heartbeat
+Remote Node ─────────────────────────────▶ Orchestrator
+  service                                  registry + run events
+  /invoke                                  Redis + Jaeger
+
+Driver ───── resolve node ───────────────▶ Orchestrator
+Driver ───── HTTP POST /invoke ─────────▶ Remote Node
+Driver ◀──── state patch / command ────── Remote Node
 ```
 
 The orchestrator image embeds both Redis and Jaeger — **no separate infra containers needed**.
@@ -197,21 +213,21 @@ docker compose -f docker/compose.remote-langgraph.yml \
 | `http://localhost:8011/health` | Orchestrator health |
 | `http://localhost:8011/runs/{run_id}` | Run event log (JSON) |
 | `http://localhost:16696` | Jaeger trace UI |
-| `http://localhost:9012/healthz` | `a2a-research` node health |
-| `http://localhost:9013/healthz` | `a2a-writer` node health |
+| `http://localhost:9012/healthz` | `remote-research` node health |
+| `http://localhost:9013/healthz` | `remote-writer` node health |
 
 ### Spreading nodes across hosts (Docker)
 
-Set `A2A_NODE_PUBLIC_ENDPOINT` to the **externally reachable** address of each node container. The orchestrator stores this URL; the driver calls it directly.
+Set `AMAZE_NODE_PUBLIC_ENDPOINT` to the **externally reachable** address of each node container. The orchestrator stores this URL; the driver calls it directly.
 
 ```yaml
 # docker-compose.yml on host B (IP 10.0.1.20)
 services:
-  a2a-researcher:
-    image: amazegraph-a2a-node
+  remote-researcher:
+    image: amazegraph-remote-node
     environment:
-      A2A_NODE_PORT: "9002"
-      A2A_NODE_PUBLIC_ENDPOINT: "http://10.0.1.20:9002/invoke"   # host B's address
+      AMAZE_NODE_PORT: "9002"
+      AMAZE_NODE_PUBLIC_ENDPOINT: "http://10.0.1.20:9002/invoke"   # host B's address
       AMAZE_ORCHESTRATOR_URL:    "http://10.0.1.10:8011"          # host A's orchestrator
     ports:
       - "9002:9002"
@@ -237,25 +253,25 @@ pip install -r requirements.txt
 **On the same machine as the Docker stack** (orchestrator published on `localhost:8011`):
 
 ```bash
-export A2A_NODE_PORT=9002
-export A2A_NODE_PUBLIC_ENDPOINT=http://localhost:9002/invoke
+export AMAZE_NODE_PORT=9002
+export AMAZE_NODE_PUBLIC_ENDPOINT=http://localhost:9002/invoke
 export AMAZE_ORCHESTRATOR_URL=http://localhost:8011
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317  # optional, Jaeger gRPC
 
-python -m examples.a2a_nodes.research_node
+python -m examples.remote_nodes.research_node
 # Self-registers with the orchestrator; health check at :9002/healthz
 ```
 
 **On a different host** (worker IP `10.0.1.20`, orchestrator on `10.0.1.10`):
 
 ```bash
-export A2A_NODE_PORT=9002
+export AMAZE_NODE_PORT=9002
 # Must be reachable by the driver — do NOT use 'localhost' here
-export A2A_NODE_PUBLIC_ENDPOINT=http://10.0.1.20:9002/invoke
+export AMAZE_NODE_PUBLIC_ENDPOINT=http://10.0.1.20:9002/invoke
 export AMAZE_ORCHESTRATOR_URL=http://10.0.1.10:8011
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://10.0.1.10:4317  # optional
 
-python -m examples.a2a_nodes.research_node
+python -m examples.remote_nodes.research_node
 ```
 
 The node POSTs its endpoint to the orchestrator on startup and removes it on shutdown. The driver resolves the endpoint at call time and invokes it directly.
@@ -286,8 +302,8 @@ if __name__ == "__main__":
 ```
 
 ```bash
-A2A_NODE_PORT=9002 \
-A2A_NODE_PUBLIC_ENDPOINT=http://localhost:9002/invoke \
+AMAZE_NODE_PORT=9002 \
+AMAZE_NODE_PUBLIC_ENDPOINT=http://localhost:9002/invoke \
 AMAZE_ORCHESTRATOR_URL=http://localhost:8011 \
 python my_node.py
 ```
@@ -414,9 +430,9 @@ Events in order: `run-start` → `node-enter` → `node-exit` (or `node-error`) 
 
 | Variable | Default | Description |
 |---|---|---|
-| `A2A_NODE_PORT` | **required** | Port the node listens on |
-| `A2A_NODE_HOST` | `0.0.0.0` | Bind address |
-| `A2A_NODE_PUBLIC_ENDPOINT` | `http://<host>:<port>/invoke` | URL advertised to the orchestrator |
+| `AMAZE_NODE_PORT` | **required** | Port the node listens on |
+| `AMAZE_NODE_HOST` | `0.0.0.0` | Bind address |
+| `AMAZE_NODE_PUBLIC_ENDPOINT` | `http://<host>:<port>/invoke` | URL advertised to the orchestrator |
 | `AMAZE_ORCHESTRATOR_URL` | `http://localhost:8001` | Orchestrator base URL |
 | `OTEL_EXPORTER_OTLP_ENDPOINT` | _(none)_ | Jaeger gRPC endpoint |
 | `LANGCHAIN_TRACING_V2` | `false` | Enable LangSmith tracing |
@@ -448,7 +464,7 @@ The orchestrator is auto-managed by the SDK; you rarely call it directly. Key en
 
 | Profile flag | Additional services activated |
 |---|---|
-| _(none)_ | orchestrator + Redis + Jaeger, `a2a-research`, `a2a-writer`, `main-langgraph` |
+| _(none)_ | orchestrator + Redis + Jaeger, `remote-research`, `remote-writer`, `main-langgraph` |
 | `--profile sprint2` | MCP server, LLM/tool node, parallel fan-out branches |
 | `--profile sprint3` | Subgraph node, counter node, schema node |
 | `--profile sprint4` | Command routing node |
@@ -472,7 +488,7 @@ aMazeGraph/
 ├── examples/
 │   ├── remote_langgraph/
 │   │   └── main.py          # Multi-scenario demo driver (22+ scenarios)
-│   └── a2a_nodes/           # Sample remote node handlers
+│   └── remote_nodes/           # Sample remote node handlers
 │       ├── research_node.py
 │       ├── writer_node.py
 │       ├── command_node.py
@@ -482,7 +498,7 @@ aMazeGraph/
 │       └── ...
 ├── docker/
 │   ├── Dockerfile.orchestrator
-│   ├── Dockerfile.a2a-node
+│   ├── Dockerfile.remote-node
 │   ├── Dockerfile.main
 │   └── compose.remote-langgraph.yml
 ├── docs/
@@ -501,6 +517,21 @@ aMazeGraph/
 ├── LICENSE
 └── README.md
 ```
+
+---
+
+## Limitations
+
+aMazeGraph is currently a distributed execution prototype, not a production service mesh.
+
+Known limitations:
+
+- remote nodes are invoked over HTTP directly by the driver
+- node registration currently assumes trusted network access
+- no built-in mTLS or node identity verification yet
+- remote node side effects must be idempotent if retries/resume are enabled
+- streaming and LangGraph `interrupt()` are planned but not stable yet
+- embedded Redis and Jaeger are for local/demo use, not production deployment
 
 ---
 

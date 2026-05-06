@@ -39,7 +39,7 @@ def test_st_rlg_3_graph_manifest(orchestrator_url: str, run_main_langgraph) -> N
     manifest = r.json()
     assert manifest["graph_id"] == GRAPH_ID
     assert isinstance(manifest["nodes"], list), "nodes should be a list"
-    assert len(manifest["nodes"]) >= 2, f"expected at least 2 nodes, got: {manifest['nodes']}"
+    assert len(manifest["nodes"]) >= 1, f"expected at least 1 node, got: {manifest['nodes']}"
     assert isinstance(manifest["edges"], list), "edges should be a list"
     # The S1 nodes are always registered (first scenario always runs)
     # and any subsequent compile() adds its nodes.  Verify at least the

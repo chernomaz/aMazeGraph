@@ -1,7 +1,7 @@
 """Sprint 5 system tests — ST-RLG-23 through ST-RLG-25.
 
 All tests rely on the `sprint5_demo` session fixture (tests/conftest.py) which
-starts the a2a-send service and runs `main-langgraph` once, caching the result.
+starts the remote-send service and runs `main-langgraph` once, caching the result.
 
 Run against an already-up stack:
 
@@ -55,7 +55,19 @@ def _require_node(orchestrator_url: str, node_name: str) -> None:
     except httpx.TransportError as exc:
         pytest.skip(f"orchestrator unreachable ({exc}); is the stack running?")
     if r.status_code != 200:
-        pytest.skip(f"node '{node_name}' not registered; is a2a-send running?")
+        pytest.skip(f"node '{node_name}' not registered; is remote-send running?")
+
+
+# ── Guard: demo must exit 0 ──────────────────────────────────────────────────
+
+
+def test_sprint5_demo_exit_code(sprint5_demo: subprocess.CompletedProcess) -> None:
+    """Fail fast if the Sprint 5 demo crashed — all scenarios passed or were SKIPped."""
+    assert sprint5_demo.returncode == 0, (
+        f"Sprint 5 demo exited {sprint5_demo.returncode}.\n"
+        f"stdout:\n{sprint5_demo.stdout[-3000:]}\n"
+        f"stderr:\n{sprint5_demo.stderr[-3000:]}"
+    )
 
 
 # ── ST-RLG-23: Single Send (case #13) ────────────────────────────────────────

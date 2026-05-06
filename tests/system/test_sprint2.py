@@ -62,6 +62,18 @@ def _require_node(orchestrator_url: str, node_name: str) -> None:
         pytest.skip(f"node '{node_name}' not registered; is the service running?")
 
 
+# ── Guard: demo must exit 0 ──────────────────────────────────────────────────
+
+
+def test_sprint2_demo_exit_code(sprint2_demo: subprocess.CompletedProcess) -> None:
+    """Fail fast if the Sprint 2 demo crashed — all scenarios passed or were SKIPped."""
+    assert sprint2_demo.returncode == 0, (
+        f"Sprint 2 demo exited {sprint2_demo.returncode}.\n"
+        f"stdout:\n{sprint2_demo.stdout[-3000:]}\n"
+        f"stderr:\n{sprint2_demo.stderr[-3000:]}"
+    )
+
+
 # ── ST-RLG-7: operator.add reducer merges log_trail ──────────────────────────
 
 

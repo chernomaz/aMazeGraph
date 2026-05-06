@@ -87,6 +87,18 @@ def _container_logs(service: str, tail: int = 500) -> str:
     return result.stdout + result.stderr
 
 
+# ── Guard: demo must exit 0 ──────────────────────────────────────────────────
+
+
+def test_sprint7_demo_exit_code(sprint7_demo: subprocess.CompletedProcess) -> None:
+    """Fail fast if the Sprint 7 demo crashed — all scenarios passed or were SKIPped."""
+    assert sprint7_demo.returncode == 0, (
+        f"Sprint 7 demo exited {sprint7_demo.returncode}.\n"
+        f"stdout:\n{sprint7_demo.stdout[-3000:]}\n"
+        f"stderr:\n{sprint7_demo.stderr[-3000:]}"
+    )
+
+
 # ── ST-RLG-28: LangSmith trace propagation ───────────────────────────────────
 
 
@@ -103,7 +115,7 @@ def test_st_rlg_28_langsmith_propagation(
        When tracing is off: just verify the S19 invoke was received.
     3. run-s19: at least one node-enter + node-exit pair for llm_tool.
     """
-    _require_node(orchestrator_url, "llm_tool", "a2a-llm-tool")
+    _require_node(orchestrator_url, "llm_tool", "remote-llm-tool")
 
     out = sprint7_demo.stdout + sprint7_demo.stderr
 
@@ -115,20 +127,20 @@ def test_st_rlg_28_langsmith_propagation(
     )
 
     # 2. Container log verification (conditional on tracing being enabled)
-    llm_logs = _container_logs("a2a-llm-tool")
+    llm_logs = _container_logs("remote-llm-tool")
     langsmith_enabled = os.environ.get("LANGCHAIN_TRACING_V2", "false").lower() == "true"
     if langsmith_enabled:
         assert "LangSmith parent_run_id=" in llm_logs, (
             "LANGCHAIN_TRACING_V2=true but 'LangSmith parent_run_id=' not found in "
-            "a2a-llm-tool logs — langsmith_context wire field was not received or logged.\n"
-            f"Recent a2a-llm-tool logs:\n{llm_logs[-2000:]}"
+            "remote-llm-tool logs — langsmith_context wire field was not received or logged.\n"
+            f"Recent remote-llm-tool logs:\n{llm_logs[-2000:]}"
         )
     else:
         # Tracing off — just verify the remote node received the S19 invocation
         assert "run_id=run-s19" in llm_logs, (
-            "Expected 'run_id=run-s19' in a2a-llm-tool logs — "
+            "Expected 'run_id=run-s19' in remote-llm-tool logs — "
             "S19 invoke did not reach the remote node.\n"
-            f"Recent a2a-llm-tool logs:\n{llm_logs[-2000:]}"
+            f"Recent remote-llm-tool logs:\n{llm_logs[-2000:]}"
         )
 
     # 3. Orchestrator run-s19: at least one normal execution event pair
@@ -163,7 +175,7 @@ def test_st_rlg_29_cache_hit(
     3. run-s20-first: at least one node-enter for cached_node (cache miss on first call).
     4. Demo output confirms S20 second cached_result matches the first.
     """
-    _require_node(orchestrator_url, "cached_node", "a2a-cached")
+    _require_node(orchestrator_url, "cached_node", "remote-cached")
 
     out = sprint7_demo.stdout + sprint7_demo.stderr
 
@@ -180,22 +192,21 @@ def test_st_rlg_29_cache_hit(
         f"S20 lines:\n" + "\n".join(s20_lines)
     )
 
-    # 3. First call: at least one cache-miss execution in event stream
-    #    (>= 1 because events accumulate across demo runs; each run adds one)
+    # 3. First call: exactly one cache-miss execution (Redis is clean at session start)
     run_first = _get_run(orchestrator_url, "run-s20-first")
     enters_first = _events_for(run_first, "node-enter", "cached_node")
-    assert len(enters_first) >= 1, (
-        f"Expected ≥1 node-enter for cached_node in run-s20-first (at least one miss "
-        f"across all demo runs), got {len(enters_first)}"
+    assert len(enters_first) == 1, (
+        f"Expected exactly 1 node-enter for cached_node in run-s20-first (cache miss), "
+        f"got {len(enters_first)}"
     )
 
-    # 4. Second call run: should have NO node-enter (always a cache hit once first filled)
-    #    Verify via demo stdout rather than Redis (which accumulates across runs)
+    # 4. Second call: zero node-enter events — cache hit means node was never invoked
     run_second = _get_run(orchestrator_url, "run-s20-second")
-    # The most-recent node-enter count for run-s20-second tells us if this demo's
-    # second call triggered execution.  With caching, count == len(enters_first) - 1
-    # if no misses on second call, but we rely on demo stdout as the authoritative check.
-    _ = run_second  # fetched to confirm it exists; stdout check above is authoritative
+    enters_second = _events_for(run_second, "node-enter", "cached_node")
+    assert len(enters_second) == 0, (
+        f"Expected 0 node-enter for cached_node in run-s20-second (should be cache hit), "
+        f"got {len(enters_second)}"
+    )
 
 
 # ── ST-RLG-30: TTL expiry ─────────────────────────────────────────────────────
@@ -215,7 +226,7 @@ def test_st_rlg_30_ttl_expiry(
     3. run-s21-first: at least one node-enter (initial fill).
     4. run-s21-third: at least one node-enter (fresh execution after expiry).
     """
-    _require_node(orchestrator_url, "cached_node", "a2a-cached")
+    _require_node(orchestrator_url, "cached_node", "remote-cached")
 
     out = sprint7_demo.stdout + sprint7_demo.stderr
 
@@ -232,18 +243,18 @@ def test_st_rlg_30_ttl_expiry(
         f"S21 lines:\n" + "\n".join(s21_lines)
     )
 
-    # 3+4. Event stream: both first and third had at least one execution
-    #      (>= 1 because events accumulate across runs)
+    # 3+4. Event stream: both first and third had exactly one execution
     run_first = _get_run(orchestrator_url, "run-s21-first")
     enters_first = _events_for(run_first, "node-enter", "cached_node")
-    assert len(enters_first) >= 1, (
-        f"Expected ≥1 node-enter for cached_node in run-s21-first, got {len(enters_first)}"
+    assert len(enters_first) == 1, (
+        f"Expected exactly 1 node-enter for cached_node in run-s21-first (cache fill), "
+        f"got {len(enters_first)}"
     )
 
     run_third = _get_run(orchestrator_url, "run-s21-third")
     enters_third = _events_for(run_third, "node-enter", "cached_node")
-    assert len(enters_third) >= 1, (
-        f"Expected ≥1 node-enter for cached_node in run-s21-third (after expiry), "
+    assert len(enters_third) == 1, (
+        f"Expected exactly 1 node-enter for cached_node in run-s21-third (fresh after expiry), "
         f"got {len(enters_third)}"
     )
 
@@ -265,7 +276,7 @@ def test_st_rlg_31_key_scoping(
     3. Demo output: 'repeat within TTL → cache hit: True'.
     4. run-s22-a1 and run-s22-b: each has at least one node-enter (cache miss).
     """
-    _require_node(orchestrator_url, "cached_node", "a2a-cached")
+    _require_node(orchestrator_url, "cached_node", "remote-cached")
 
     out = sprint7_demo.stdout + sprint7_demo.stderr
 
@@ -286,15 +297,23 @@ def test_st_rlg_31_key_scoping(
         f"S22 lines:\n" + "\n".join(s22_lines)
     )
 
-    # 4. Event stream: input-A and input-B each triggered at least one execution
+    # 4. Event stream: input-A and input-B each triggered exactly one execution;
+    #    repeat input-A (run-s22-a2) is a cache hit → zero executions
     run_a1 = _get_run(orchestrator_url, "run-s22-a1")
     enters_a1 = _events_for(run_a1, "node-enter", "cached_node")
-    assert len(enters_a1) >= 1, (
-        f"Expected ≥1 node-enter for cached_node in run-s22-a1, got {len(enters_a1)}"
+    assert len(enters_a1) == 1, (
+        f"Expected exactly 1 node-enter for cached_node in run-s22-a1, got {len(enters_a1)}"
     )
 
     run_b = _get_run(orchestrator_url, "run-s22-b")
     enters_b = _events_for(run_b, "node-enter", "cached_node")
-    assert len(enters_b) >= 1, (
-        f"Expected ≥1 node-enter for cached_node in run-s22-b, got {len(enters_b)}"
+    assert len(enters_b) == 1, (
+        f"Expected exactly 1 node-enter for cached_node in run-s22-b, got {len(enters_b)}"
+    )
+
+    run_a2 = _get_run(orchestrator_url, "run-s22-a2")
+    enters_a2 = _events_for(run_a2, "node-enter", "cached_node")
+    assert len(enters_a2) == 0, (
+        f"Expected 0 node-enter for cached_node in run-s22-a2 (repeat input-A, cache hit), "
+        f"got {len(enters_a2)}"
     )

@@ -60,6 +60,8 @@ def compose_stack():
         return
 
     _compose("down", "-v", capture=True)
+    # Build main-langgraph first (--no-deps: only rebuild the image, don't start yet)
+    _compose("build", "main-langgraph", check=True, timeout=300)
     _compose(
         "up",
         "-d",
@@ -68,8 +70,8 @@ def compose_stack():
         # orchestrator container (post-S1 polish). Starting it separately
         # would fail with "no such service: jaeger".
         "orchestrator",
-        "a2a-research",
-        "a2a-writer",
+        "remote-research",
+        "remote-writer",
         check=True,
         timeout=900,
     )
@@ -156,13 +158,13 @@ def sprint2_demo(compose_stack) -> subprocess.CompletedProcess:
 
 @pytest.fixture(scope="session")
 def sprint3_stack(compose_stack) -> None:
-    """Extend compose_stack with Sprint 3 services (a2a-s3, a2a-s3-counter, a2a-s3-schema)."""
+    """Extend compose_stack with Sprint 3 services (remote-s3, remote-s3-counter, remote-s3-schema)."""
     if os.environ.get("AMAZEGRAPH_SKIP_COMPOSE") == "1":
         return
     _compose(
-        "up", "-d", "--build",
-        "a2a-s3", "a2a-s3-counter", "a2a-s3-schema",
-        "a2a-llm-tool", "a2a-audit", "a2a-research-a", "a2a-research-b",
+        "up", "-d", "--build", "--no-deps",
+        "remote-s3", "remote-s3-counter", "remote-s3-schema",
+        "remote-llm-tool", "remote-audit", "remote-research-a", "remote-research-b",
         check=True,
         timeout=900,
     )
@@ -203,16 +205,16 @@ def sprint3_demo(sprint3_stack) -> subprocess.CompletedProcess:
 
 @pytest.fixture(scope="session")
 def sprint4_stack(compose_stack) -> None:
-    """Extend compose_stack with the Sprint 4 a2a-command service and wait for it to register."""
+    """Extend compose_stack with the Sprint 4 remote-command service and wait for it to register."""
     if os.environ.get("AMAZEGRAPH_SKIP_COMPOSE") == "1":
         return
     _compose(
-        "up", "-d", "--build",
-        "a2a-command",
+        "up", "-d", "--build", "--no-deps",
+        "remote-command",
         check=True,
         timeout=900,
     )
-    # a2a-command does NOT publish a host port; verify registration via orchestrator.
+    # remote-command does NOT publish a host port; verify registration via orchestrator.
     deadline = time.time() + 120.0
     while time.time() < deadline:
         try:
@@ -247,12 +249,12 @@ def sprint4_demo(sprint4_stack) -> subprocess.CompletedProcess:
 
 @pytest.fixture(scope="session")
 def sprint5_stack(compose_stack) -> None:
-    """Extend compose_stack with the Sprint 5 a2a-send service and wait for it to register."""
+    """Extend compose_stack with the Sprint 5 remote-send service and wait for it to register."""
     if os.environ.get("AMAZEGRAPH_SKIP_COMPOSE") == "1":
         return
     _compose(
-        "up", "-d", "--build",
-        "a2a-send",
+        "up", "-d", "--build", "--no-deps",
+        "remote-send",
         check=True,
         timeout=900,
     )
@@ -286,13 +288,12 @@ def sprint5_demo(sprint5_stack) -> subprocess.CompletedProcess:
 
 @pytest.fixture(scope="session")
 def sprint6_stack(compose_stack) -> None:
-    """Extend compose_stack with the Sprint 6 a2a-accumulator service and wait for it to register."""
+    """Extend compose_stack with the Sprint 6 remote-accumulator service and wait for it to register."""
     if os.environ.get("AMAZEGRAPH_SKIP_COMPOSE") == "1":
         return
     _compose(
-        "up", "-d", "--build",
-        "--profile", "sprint6",
-        "a2a-accumulator",
+        "up", "-d", "--build", "--no-deps",
+        "remote-accumulator",
         check=True,
         timeout=900,
     )
@@ -326,8 +327,8 @@ def sprint6_demo(sprint6_stack) -> subprocess.CompletedProcess:
 
 @pytest.fixture
 def research_with_env():
-    container_name = f"{PROJECT}-a2a-research-debug"
-    image = f"{PROJECT}-a2a-research"
+    container_name = f"{PROJECT}-remote-research-debug"
+    image = f"{PROJECT}-remote-research"
     network = f"{PROJECT}_default"
     debug_endpoint = f"http://{container_name}:9002/invoke"
     saved: dict[str, str] | None = None
@@ -350,9 +351,9 @@ def research_with_env():
             env_pairs.extend(["-e", f"{k}={v}"])
         env_pairs.extend([
             "-e", "AMAZE_ORCHESTRATOR_URL=http://orchestrator:8001",
-            "-e", f"A2A_NODE_PUBLIC_ENDPOINT={debug_endpoint}",
-            "-e", "A2A_NODE_HOST=0.0.0.0",
-            "-e", "A2A_NODE_PORT=9002",
+            "-e", f"AMAZE_NODE_PUBLIC_ENDPOINT={debug_endpoint}",
+            "-e", "AMAZE_NODE_HOST=0.0.0.0",
+            "-e", "AMAZE_NODE_PORT=9002",
             "-e", "OTEL_EXPORTER_OTLP_ENDPOINT=http://orchestrator:4317",
         ])
         cmd = [
@@ -395,14 +396,14 @@ def research_with_env():
 
 @pytest.fixture(scope="session")
 def sprint7_stack(compose_stack) -> None:
-    """Extend compose_stack with Sprint 7 services: a2a-cached (cache test) and
-    a2a-llm-tool (LangSmith trace test). Waits for node registration."""
+    """Extend compose_stack with Sprint 7 services: remote-cached (cache test) and
+    remote-llm-tool (LangSmith trace test). Waits for node registration."""
     if os.environ.get("AMAZEGRAPH_SKIP_COMPOSE") == "1":
         return
     _compose(
-        "up", "-d", "--build",
-        "--profile", "sprint7",
-        "a2a-llm-tool",
+        "up", "-d", "--build", "--no-deps",
+        "remote-llm-tool",
+        "remote-cached",
         check=True,
         timeout=900,
     )

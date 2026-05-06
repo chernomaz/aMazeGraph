@@ -60,6 +60,18 @@ def _require_node(orchestrator_url: str, node_name: str) -> None:
         pytest.skip(f"node '{node_name}' not registered; is the service running?")
 
 
+# ── Guard: demo must exit 0 ──────────────────────────────────────────────────
+
+
+def test_sprint3_demo_exit_code(sprint3_demo: subprocess.CompletedProcess) -> None:
+    """Fail fast if the Sprint 3 demo crashed — all scenarios passed or were SKIPped."""
+    assert sprint3_demo.returncode == 0, (
+        f"Sprint 3 demo exited {sprint3_demo.returncode}.\n"
+        f"stdout:\n{sprint3_demo.stdout[-3000:]}\n"
+        f"stderr:\n{sprint3_demo.stderr[-3000:]}"
+    )
+
+
 # ── ST-RLG-15: Subgraph node (cases #19 + #20) ───────────────────────────────
 
 

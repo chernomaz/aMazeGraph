@@ -1,7 +1,7 @@
 """Sprint 6 system tests — ST-RLG-27: Thread persistence via checkpointer (Case 23).
 
 All tests rely on the `sprint6_demo` session fixture (tests/conftest.py) which
-starts the a2a-accumulator service and runs `main-langgraph` once, caching
+starts the remote-accumulator service and runs `main-langgraph` once, caching
 the result.
 
 Run against an already-up stack:
@@ -55,7 +55,19 @@ def _require_node(orchestrator_url: str, node_name: str) -> None:
     except httpx.TransportError as exc:
         pytest.skip(f"orchestrator unreachable ({exc}); is the stack running?")
     if r.status_code != 200:
-        pytest.skip(f"node '{node_name}' not registered; is a2a-accumulator running?")
+        pytest.skip(f"node '{node_name}' not registered; is remote-accumulator running?")
+
+
+# ── Guard: demo must exit 0 ──────────────────────────────────────────────────
+
+
+def test_sprint6_demo_exit_code(sprint6_demo: subprocess.CompletedProcess) -> None:
+    """Fail fast if the Sprint 6 demo crashed — all scenarios passed or were SKIPped."""
+    assert sprint6_demo.returncode == 0, (
+        f"Sprint 6 demo exited {sprint6_demo.returncode}.\n"
+        f"stdout:\n{sprint6_demo.stdout[-3000:]}\n"
+        f"stderr:\n{sprint6_demo.stderr[-3000:]}"
+    )
 
 
 # ── ST-RLG-27: Thread persistence via checkpointer (Case 23) ─────────────────

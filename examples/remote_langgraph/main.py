@@ -19,6 +19,7 @@ import logging
 import operator
 import os
 import sys
+import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Any, TypedDict
 
@@ -698,7 +699,7 @@ async def scenario_s12_command_multi_goto() -> dict:
     wf.add_node("cmd_entry", cmd_entry_node)
     wf.remote_node("command")
     wf.add_node("cmd_sink_a", cmd_sink_a_node)
-    wf.remote_node("writer")           # remote node — runs in a2a-writer container
+    wf.remote_node("writer")           # remote node — runs in remote-writer container
     wf.add_node("cmd_joiner", cmd_joiner_node)
     wf.set_entry_point("cmd_entry")
     wf.add_edge("cmd_entry", "command")
@@ -881,7 +882,7 @@ async def scenario_s18_checkpointer(checkpointer) -> dict:
 
     app = wf.compile()
 
-    cfg: RunnableConfig = {"configurable": {"thread_id": "s18-thread"}}
+    cfg: RunnableConfig = {"configurable": {"thread_id": f"s18-{uuid.uuid4().hex[:8]}"}}
 
     await wf.orchestrator.emit_event(
         "run-s18",
@@ -1109,7 +1110,7 @@ async def main_async() -> int:
             outcomes["S2"] = "ok"
         except RemoteNodeNotRegistered:
             outcomes["S2"] = "SKIP: llm_tool node not running"
-            logger.warning("S2: llm_tool node not registered — is a2a-llm-tool running?")
+            logger.warning("S2: llm_tool node not registered — is remote-llm-tool running?")
         except Exception as exc:
             logger.error("S2 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S2"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1122,7 +1123,7 @@ async def main_async() -> int:
             outcomes["S3"] = "ok" if (got_thread and got_tenant) else f"MISMATCH thread={r.get('echoed_thread')!r} tenant={r.get('echoed_tenant')!r}"
         except RemoteNodeNotRegistered:
             outcomes["S3"] = "SKIP: config_echo node not running"
-            logger.warning("S3: config_echo node not registered — is a2a-audit running?")
+            logger.warning("S3: config_echo node not registered — is remote-audit running?")
         except Exception as exc:
             logger.error("S3 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S3"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1153,7 +1154,7 @@ async def main_async() -> int:
             outcomes["S5"] = "ok" if r.get("user_request") else "state-lost"
         except RemoteNodeNotRegistered:
             outcomes["S5"] = "SKIP: audit node not running"
-            logger.warning("S5: audit node not registered — is a2a-audit running?")
+            logger.warning("S5: audit node not registered — is remote-audit running?")
         except Exception as exc:
             logger.error("S5 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S5"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1167,7 +1168,7 @@ async def main_async() -> int:
             outcomes["S6"] = "ok" if (has_a and has_b) else f"INCOMPLETE results={results}"
         except RemoteNodeNotRegistered:
             outcomes["S6"] = "SKIP: research_a/b not running"
-            logger.warning("S6: research_a/b nodes not registered — are a2a-research-a/b running?")
+            logger.warning("S6: research_a/b nodes not registered — are remote-research-a/b running?")
         except Exception as exc:
             logger.error("S6 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S6"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1181,7 +1182,7 @@ async def main_async() -> int:
             outcomes["S7"] = "ok" if (has_local and has_remote) else f"INCOMPLETE log_trail={trail}"
         except RemoteNodeNotRegistered:
             outcomes["S7"] = "SKIP: research node not running"
-            logger.warning("S7: research node not registered — is a2a-research running?")
+            logger.warning("S7: research node not registered — is remote-research running?")
         except Exception as exc:
             logger.error("S7 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S7"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1193,7 +1194,7 @@ async def main_async() -> int:
             outcomes["S8"] = "ok" if ("step_a" in res and "step_b" in res) else f"INCOMPLETE research_result={res[:80]}"
         except RemoteNodeNotRegistered:
             outcomes["S8"] = "SKIP: subgraph node not running"
-            logger.warning("S8: subgraph node not registered — is a2a-s3 running?")
+            logger.warning("S8: subgraph node not registered — is remote-s3 running?")
         except Exception as exc:
             logger.error("S8 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S8"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1206,7 +1207,7 @@ async def main_async() -> int:
             outcomes["S9"] = "ok" if (has_answer and no_private) else f"UNEXPECTED keys={list(r.keys())}"
         except RemoteNodeNotRegistered:
             outcomes["S9"] = "SKIP: schema_remote node not running"
-            logger.warning("S9: schema_remote node not registered — is a2a-s3 running?")
+            logger.warning("S9: schema_remote node not registered — is remote-s3 running?")
         except Exception as exc:
             logger.error("S9 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S9"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1219,7 +1220,7 @@ async def main_async() -> int:
             outcomes["S10"] = "ok" if (final_count >= 3 and step_echo is not None) else f"INCOMPLETE count={final_count} step_echo={step_echo}"
         except RemoteNodeNotRegistered:
             outcomes["S10"] = "SKIP: counter node not running"
-            logger.warning("S10: counter node not registered — is a2a-s3 running?")
+            logger.warning("S10: counter node not registered — is remote-s3 running?")
         except Exception as exc:
             logger.error("S10 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S10"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1230,7 +1231,7 @@ async def main_async() -> int:
             outcomes["S11"] = "ok" if r.get("cmd_result") == "single-goto-result" else f"UNEXPECTED cmd_result={r.get('cmd_result')!r}"
         except RemoteNodeNotRegistered:
             outcomes["S11"] = "SKIP: command node not running"
-            logger.warning("S11: command node not registered — is a2a-command running?")
+            logger.warning("S11: command node not registered — is remote-command running?")
         except Exception as exc:
             logger.error("S11 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S11"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1242,7 +1243,7 @@ async def main_async() -> int:
             outcomes["S11b"] = "ok" if cmd.startswith("processed:") else f"UNEXPECTED cmd_result={cmd!r}"
         except RemoteNodeNotRegistered:
             outcomes["S11b"] = "SKIP: command node not running"
-            logger.warning("S11b: command node not registered — is a2a-command running?")
+            logger.warning("S11b: command node not registered — is remote-command running?")
         except Exception as exc:
             logger.error("S11b failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S11b"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1255,7 +1256,7 @@ async def main_async() -> int:
             outcomes["S12"] = "ok" if "from_cmd_sink_a" in results else f"INCOMPLETE results={results}"
         except RemoteNodeNotRegistered:
             outcomes["S12"] = "SKIP: command node not running"
-            logger.warning("S12: command node not registered — is a2a-command running?")
+            logger.warning("S12: command node not registered — is remote-command running?")
         except Exception as exc:
             logger.error("S12 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S12"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1266,7 +1267,7 @@ async def main_async() -> int:
             outcomes["S13"] = "ok (proxy_block verified)" if r.get("proxy_block_verified") else "UNEXPECTED: no error raised"
         except RemoteNodeNotRegistered:
             outcomes["S13"] = "SKIP: command node not running"
-            logger.warning("S13: command node not registered — is a2a-command running?")
+            logger.warning("S13: command node not registered — is remote-command running?")
         except Exception as exc:
             logger.error("S13 failed unexpectedly [%s]: %s", type(exc).__name__, exc)
             outcomes["S13"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1280,7 +1281,7 @@ async def main_async() -> int:
             outcomes["S14"] = "ok" if (has_val and no_marker) else f"UNEXPECTED send_received={recv}"
         except RemoteNodeNotRegistered:
             outcomes["S14"] = "SKIP: send_dispatcher not running"
-            logger.warning("S14: send_dispatcher not registered — is a2a-send running?")
+            logger.warning("S14: send_dispatcher not registered — is remote-send running?")
         except Exception as exc:
             logger.error("S14 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S14"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1294,7 +1295,7 @@ async def main_async() -> int:
             outcomes["S15"] = "ok" if (has_a and has_b) else f"INCOMPLETE send_results={results}"
         except RemoteNodeNotRegistered:
             outcomes["S15"] = "SKIP: send_dispatcher not running"
-            logger.warning("S15: send_dispatcher not registered — is a2a-send running?")
+            logger.warning("S15: send_dispatcher not registered — is remote-send running?")
         except Exception as exc:
             logger.error("S15 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S15"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1306,7 +1307,7 @@ async def main_async() -> int:
             outcomes["S16"] = "ok" if (r.get("status") == "dispatched" and "val" in recv) else f"UNEXPECTED status={r.get('status')!r} send_received={recv}"
         except RemoteNodeNotRegistered:
             outcomes["S16"] = "SKIP: send_dispatcher not running"
-            logger.warning("S16: send_dispatcher not registered — is a2a-send running?")
+            logger.warning("S16: send_dispatcher not registered — is remote-send running?")
         except Exception as exc:
             logger.error("S16 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S16"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1318,7 +1319,7 @@ async def main_async() -> int:
             outcomes["S17"] = "ok" if "val" in recv else f"UNEXPECTED send_received={recv}"
         except RemoteNodeNotRegistered:
             outcomes["S17"] = "SKIP: send_dispatcher not running"
-            logger.warning("S17: send_dispatcher not registered — is a2a-send running?")
+            logger.warning("S17: send_dispatcher not registered — is remote-send running?")
         except Exception as exc:
             logger.error("S17 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S17"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1339,7 +1340,7 @@ async def main_async() -> int:
             )
         except RemoteNodeNotRegistered:
             outcomes["S18"] = "SKIP: accumulator node not running"
-            logger.warning("S18: accumulator node not registered — is a2a-accumulator running?")
+            logger.warning("S18: accumulator node not registered — is remote-accumulator running?")
         except Exception as exc:
             logger.error("S18 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S18"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1350,7 +1351,7 @@ async def main_async() -> int:
             outcomes["S19"] = "ok" if r.get("tool_result") else "no-tool_result"
         except RemoteNodeNotRegistered:
             outcomes["S19"] = "SKIP: llm_tool node not running"
-            logger.warning("S19: llm_tool node not registered — is a2a-llm-tool running?")
+            logger.warning("S19: llm_tool node not registered — is remote-llm-tool running?")
         except Exception as exc:
             logger.error("S19 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S19"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1361,7 +1362,7 @@ async def main_async() -> int:
             outcomes["S20"] = "ok (cache hit)" if r.get("cache_hit") else f"MISS: result1={r.get('cached_result_1')!r} result2={r.get('cached_result_2')!r}"
         except RemoteNodeNotRegistered:
             outcomes["S20"] = "SKIP: cached_node not running"
-            logger.warning("S20: cached_node not registered — is a2a-cached running?")
+            logger.warning("S20: cached_node not registered — is remote-cached running?")
         except Exception as exc:
             logger.error("S20 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S20"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1372,7 +1373,7 @@ async def main_async() -> int:
             outcomes["S21"] = "ok (TTL expired)" if r.get("expiry_verified") else f"NOT EXPIRED: result1={r.get('cached_result_1')!r} result3={r.get('cached_result_3')!r}"
         except RemoteNodeNotRegistered:
             outcomes["S21"] = "SKIP: cached_node not running"
-            logger.warning("S21: cached_node not registered — is a2a-cached running?")
+            logger.warning("S21: cached_node not registered — is remote-cached running?")
         except Exception as exc:
             logger.error("S21 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S21"] = f"FAILED: {type(exc).__name__}: {exc}"
@@ -1384,7 +1385,7 @@ async def main_async() -> int:
             outcomes["S22"] = "ok (scoping verified)" if ok else f"UNEXPECTED diff_inputs={r.get('diff_inputs')} same_repeat={r.get('same_repeat')}"
         except RemoteNodeNotRegistered:
             outcomes["S22"] = "SKIP: cached_node not running"
-            logger.warning("S22: cached_node not registered — is a2a-cached running?")
+            logger.warning("S22: cached_node not registered — is remote-cached running?")
         except Exception as exc:
             logger.error("S22 failed [%s]: %s", type(exc).__name__, exc)
             outcomes["S22"] = f"FAILED: {type(exc).__name__}: {exc}"

@@ -29,7 +29,7 @@ Anything outside this document is **out of scope for Sprint 1** — see the
 |---|---|---|---|---|
 | `graph_id` | yes | string, 1–128 chars, `[a-z0-9_-]+` | author of the LangGraph program | registration, resolution, manifest, run events |
 | `node_name` | yes | string, 1–64 chars, matches a `StateGraph.add_node` name | author | registration, resolution, run events |
-| `endpoint` | yes | absolute URL ending in the node's invoke path, e.g. `http://a2a-research:9002/invoke` | the remote node at startup | resolution, proxy invoke |
+| `endpoint` | yes | absolute URL ending in the node's invoke path, e.g. `http://remote-research:9002/invoke` | the remote node at startup | resolution, proxy invoke |
 | `run_id` | yes | string supplied by the caller in initial state | end user / driver | run event grouping, log correlation |
 | `trace_id` | yes | string supplied by the caller in initial state OR W3C `traceparent` header | end user / driver | OTel span linkage, log correlation |
 
@@ -58,7 +58,7 @@ Content-Type: application/json
 {
   "graph_id": "demo_graph_v1",
   "node_name": "research",
-  "endpoint": "http://a2a-research:9002/invoke"
+  "endpoint": "http://remote-research:9002/invoke"
 }
 ```
 Response 200:
@@ -78,7 +78,7 @@ the key was already absent (idempotent).
 Response 200:
 ```json
 { "graph_id": "demo_graph_v1", "node_name": "research",
-  "endpoint": "http://a2a-research:9002/invoke" }
+  "endpoint": "http://remote-research:9002/invoke" }
 ```
 Response 404: node not registered. Body: `{"detail":"node-not-registered","graph_id":...,"node_name":...}`.
 
@@ -183,7 +183,7 @@ startup.
 ### 3.3 Lifespan
 
 On startup:
-1. Initialize OTel SDK with service-name `a2a-{node_name}` and OTLP endpoint.
+1. Initialize OTel SDK with service-name `remote-{node_name}` and OTLP endpoint.
 2. POST `/register/node` to the orchestrator with retry-with-backoff (HTTP
    4xx → fail fast; connect errors → up to 5 retries with 2s delay).
 3. Start uvicorn server.
@@ -466,7 +466,7 @@ Sprint 2 vendors a FastMCP server at `examples/mcp_server/` (copied from
 - The MCP server runs as a separate compose service named `mcp`,
   transport `streamable-http`, port 8000 internal.
 - It auto-discovers LangChain `@tool` functions from `examples/mcp_server/tools/*.py`.
-- Sprint 2's `examples/a2a_nodes/llm_tool_node.py` connects to the MCP
+- Sprint 2's `examples/remote_nodes/llm_tool_node.py` connects to the MCP
   server via `langchain-mcp-adapters` (or direct `fastmcp.Client`), binds
   the discovered tools to a `ChatOpenAI` instance, and lets the model
   decide which tool to call.
@@ -875,7 +875,7 @@ Rules:
   a DEBUG log — graceful degradation.
 - The remote node MUST have `LANGCHAIN_TRACING_V2=true` and `LANGSMITH_API_KEY`
   set in its environment to write traces. Sprint 7 adds these vars to all
-  `a2a-*` compose services via `${LANGCHAIN_TRACING_V2:-false}` pass-through.
+  `remote-*` compose services via `${LANGCHAIN_TRACING_V2:-false}` pass-through.
 - Handler authors MUST pass `config=config` to every `LLM.ainvoke()` call
   inside their handler so the injected tracer propagates into LLM child runs.
 
@@ -912,7 +912,7 @@ disabled for that node.
 {
   "graph_id": "demo_graph_v1",
   "node_name": "cached_node",
-  "endpoint": "http://a2a-cached:9017/invoke",
+  "endpoint": "http://remote-cached:9017/invoke",
   "cache_ttl": 60
 }
 ```
@@ -923,7 +923,7 @@ disabled for that node.
 {
   "graph_id": "demo_graph_v1",
   "node_name": "cached_node",
-  "endpoint": "http://a2a-cached:9017/invoke",
+  "endpoint": "http://remote-cached:9017/invoke",
   "cache_ttl": 60
 }
 ```

@@ -24,5 +24,5 @@ async def command_handler(state: dict, config: dict) -> Command:
 
 
 if __name__ == "__main__":
-    setup_logging("a2a-command")
+    setup_logging("remote-command")
     serve_node()

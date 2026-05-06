@@ -1,10 +1,11 @@
 #!/bin/sh
 set -e
 
-redis-server --daemonize yes --bind 0.0.0.0 --port 6379 --save "" --appendonly no --protected-mode no
+/opt/redis-stack/bin/redis-stack-server --daemonize yes --bind 0.0.0.0 --port 6379 \
+  --save "" --appendonly no --protected-mode no
 
 for i in $(seq 1 30); do
-  if redis-cli -h 127.0.0.1 -p 6379 ping >/dev/null 2>&1; then
+  if /opt/redis-stack/bin/redis-cli -h 127.0.0.1 -p 6379 ping >/dev/null 2>&1; then
     break
   fi
   sleep 0.2

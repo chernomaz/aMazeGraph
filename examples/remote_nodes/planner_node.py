@@ -34,5 +34,5 @@ async def planner_handler(state: dict, config: dict) -> dict:
 
 
 if __name__ == "__main__":
-    setup_logging("a2a-planner")
+    setup_logging("remote-planner")
     serve_node()

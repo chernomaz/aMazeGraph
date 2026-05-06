@@ -335,8 +335,8 @@ def serve_node(
     """Start a FastAPI server hosting every @remote_node-decorated handler in this process.
 
     Resolution order for each parameter: explicit argument → env var → default.
-    Env vars: A2A_NODE_HOST, A2A_NODE_PORT, A2A_NODE_PUBLIC_HOST,
-    A2A_NODE_PUBLIC_ENDPOINT, AMAZE_ORCHESTRATOR_URL, OTEL_SERVICE_NAME.
+    Env vars: AMAZE_NODE_HOST, AMAZE_NODE_PORT, AMAZE_NODE_PUBLIC_HOST,
+    AMAZE_NODE_PUBLIC_ENDPOINT, AMAZE_ORCHESTRATOR_URL, OTEL_SERVICE_NAME.
     """
     if not _REGISTERED_HANDLERS:
         raise RuntimeError(
@@ -344,17 +344,17 @@ def serve_node(
             "decorate at least one async function before calling serve_node()"
         )
 
-    host = host or os.environ.get("A2A_NODE_HOST", "0.0.0.0")
+    host = host or os.environ.get("AMAZE_NODE_HOST", "0.0.0.0")
     if port is None:
-        port_env = os.environ.get("A2A_NODE_PORT")
+        port_env = os.environ.get("AMAZE_NODE_PORT")
         if not port_env:
-            raise RuntimeError("port must be set via argument or A2A_NODE_PORT env var")
+            raise RuntimeError("port must be set via argument or AMAZE_NODE_PORT env var")
         port = int(port_env)
 
     if public_endpoint is None:
-        public_endpoint = os.environ.get("A2A_NODE_PUBLIC_ENDPOINT")
+        public_endpoint = os.environ.get("AMAZE_NODE_PUBLIC_ENDPOINT")
     if public_endpoint is None:
-        ph = public_host or os.environ.get("A2A_NODE_PUBLIC_HOST", "localhost")
+        ph = public_host or os.environ.get("AMAZE_NODE_PUBLIC_HOST", "localhost")
         public_endpoint = f"http://{ph}:{port}/invoke"
 
     orchestrator_url = orchestrator_url or os.environ.get(
@@ -362,7 +362,7 @@ def serve_node(
     )
 
     service_name = os.environ.get("OTEL_SERVICE_NAME") or (
-        "a2a-" + "-".join(sorted({n for _, n, _, _ in _REGISTERED_HANDLERS}))
+        "remote-" + "-".join(sorted({n for _, n, _, _ in _REGISTERED_HANDLERS}))
     )
     setup_logging(service_name)
 

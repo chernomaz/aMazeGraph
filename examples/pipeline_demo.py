@@ -28,8 +28,8 @@ Run the stack:
 Or run the nodes manually (three terminals):
 
     # terminal 1 — planner
-    A2A_NODE_PORT=9020 A2A_NODE_PUBLIC_ENDPOINT=http://localhost:9020/invoke \\
-        /home/ubuntu/venv/bin/python -m examples.a2a_nodes.planner_node
+    AMAZE_NODE_PORT=9020 AMAZE_NODE_PUBLIC_ENDPOINT=http://localhost:9020/invoke \\
+        /home/ubuntu/venv/bin/python -m examples.remote_nodes.planner_node
 
     # terminal 2 — researcher (already on port 9002 if main stack is up)
     # terminal 3 — writer    (already on port 9003 if main stack is up)

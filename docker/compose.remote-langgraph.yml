@@ -21,19 +21,19 @@ services:
       timeout: 3s
       retries: 30
 
-  a2a-research:
+  remote-research:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.a2a-node
+      dockerfile: docker/Dockerfile.remote-node
       args:
-        NODE_MODULE: examples.a2a_nodes.research_node
+        NODE_MODULE: examples.remote_nodes.research_node
     environment:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      A2A_NODE_HOST: 0.0.0.0
-      A2A_NODE_PORT: "9002"
-      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-research:9002/invoke
+      AMAZE_NODE_HOST: 0.0.0.0
+      AMAZE_NODE_PORT: "9002"
+      AMAZE_NODE_PUBLIC_ENDPOINT: http://remote-research:9002/invoke
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
@@ -48,19 +48,19 @@ services:
       timeout: 3s
       retries: 30
 
-  a2a-writer:
+  remote-writer:
     build:
       context: ..
-      dockerfile: docker/Dockerfile.a2a-node
+      dockerfile: docker/Dockerfile.remote-node
       args:
-        NODE_MODULE: examples.a2a_nodes.writer_node
+        NODE_MODULE: examples.remote_nodes.writer_node
     environment:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      A2A_NODE_HOST: 0.0.0.0
-      A2A_NODE_PORT: "9003"
-      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-writer:9003/invoke
+      AMAZE_NODE_HOST: 0.0.0.0
+      AMAZE_NODE_PORT: "9003"
+      AMAZE_NODE_PUBLIC_ENDPOINT: http://remote-writer:9003/invoke
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
@@ -95,21 +95,21 @@ services:
 
   # Sprint 3 nodes ──────────────────────────────────────────────────────────
 
-  a2a-s3:
+  remote-s3:
     profiles: [sprint3]
     # ST-RLG-15..18: subgraph (cases 19+20), counter (case 25), schema_remote (case 28)
     build:
       context: ..
-      dockerfile: docker/Dockerfile.a2a-node
+      dockerfile: docker/Dockerfile.remote-node
       args:
-        NODE_MODULE: examples.a2a_nodes.subgraph_node
+        NODE_MODULE: examples.remote_nodes.subgraph_node
     environment:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      A2A_NODE_HOST: 0.0.0.0
-      A2A_NODE_PORT: "9008"
-      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-s3:9008/invoke
+      AMAZE_NODE_HOST: 0.0.0.0
+      AMAZE_NODE_PORT: "9008"
+      AMAZE_NODE_PUBLIC_ENDPOINT: http://remote-s3:9008/invoke
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
@@ -122,21 +122,21 @@ services:
       timeout: 3s
       retries: 30
 
-  a2a-s3-counter:
+  remote-s3-counter:
     profiles: [sprint3]
     # counter node for recursion/step metadata (case 25)
     build:
       context: ..
-      dockerfile: docker/Dockerfile.a2a-node
+      dockerfile: docker/Dockerfile.remote-node
       args:
-        NODE_MODULE: examples.a2a_nodes.counter_node
+        NODE_MODULE: examples.remote_nodes.counter_node
     environment:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      A2A_NODE_HOST: 0.0.0.0
-      A2A_NODE_PORT: "9009"
-      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-s3-counter:9009/invoke
+      AMAZE_NODE_HOST: 0.0.0.0
+      AMAZE_NODE_PORT: "9009"
+      AMAZE_NODE_PUBLIC_ENDPOINT: http://remote-s3-counter:9009/invoke
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
@@ -149,21 +149,21 @@ services:
       timeout: 3s
       retries: 30
 
-  a2a-s3-schema:
+  remote-s3-schema:
     profiles: [sprint3]
     # schema_remote node for input/output/private schemas demo (case 28)
     build:
       context: ..
-      dockerfile: docker/Dockerfile.a2a-node
+      dockerfile: docker/Dockerfile.remote-node
       args:
-        NODE_MODULE: examples.a2a_nodes.schema_node
+        NODE_MODULE: examples.remote_nodes.schema_node
     environment:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      A2A_NODE_HOST: 0.0.0.0
-      A2A_NODE_PORT: "9010"
-      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-s3-schema:9010/invoke
+      AMAZE_NODE_HOST: 0.0.0.0
+      AMAZE_NODE_PORT: "9010"
+      AMAZE_NODE_PUBLIC_ENDPOINT: http://remote-s3-schema:9010/invoke
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
@@ -178,20 +178,20 @@ services:
 
   # Pipeline demo ──────────────────────────────────────────────────────────
 
-  a2a-planner:
+  remote-planner:
     profiles: [pipeline]
     build:
       context: ..
-      dockerfile: docker/Dockerfile.a2a-node
+      dockerfile: docker/Dockerfile.remote-node
       args:
-        NODE_MODULE: examples.a2a_nodes.planner_node
+        NODE_MODULE: examples.remote_nodes.planner_node
     environment:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      A2A_NODE_HOST: 0.0.0.0
-      A2A_NODE_PORT: "9020"
-      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-planner:9020/invoke
+      AMAZE_NODE_HOST: 0.0.0.0
+      AMAZE_NODE_PORT: "9020"
+      AMAZE_NODE_PUBLIC_ENDPOINT: http://remote-planner:9020/invoke
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
@@ -217,30 +217,30 @@ services:
     depends_on:
       orchestrator:
         condition: service_healthy
-      a2a-research:
+      remote-research:
         condition: service_healthy
-      a2a-writer:
+      remote-writer:
         condition: service_healthy
-      a2a-planner:
+      remote-planner:
         condition: service_healthy
     restart: "no"
 
   # Sprint 5 nodes ──────────────────────────────────────────────────────────
 
-  a2a-send:
+  remote-send:
     profiles: [sprint5]
     build:
       context: ..
-      dockerfile: docker/Dockerfile.a2a-node
+      dockerfile: docker/Dockerfile.remote-node
       args:
-        NODE_MODULE: examples.a2a_nodes.send_node
+        NODE_MODULE: examples.remote_nodes.send_node
     environment:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      A2A_NODE_HOST: 0.0.0.0
-      A2A_NODE_PORT: "9014"
-      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-send:9014/invoke
+      AMAZE_NODE_HOST: 0.0.0.0
+      AMAZE_NODE_PORT: "9014"
+      AMAZE_NODE_PUBLIC_ENDPOINT: http://remote-send:9014/invoke
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
@@ -255,20 +255,20 @@ services:
 
   # Sprint 6 nodes ──────────────────────────────────────────────────────────
 
-  a2a-accumulator:
+  remote-accumulator:
     profiles: [sprint6]
     build:
       context: ..
-      dockerfile: docker/Dockerfile.a2a-node
+      dockerfile: docker/Dockerfile.remote-node
       args:
-        NODE_MODULE: examples.a2a_nodes.accumulator_node
+        NODE_MODULE: examples.remote_nodes.accumulator_node
     environment:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      A2A_NODE_HOST: 0.0.0.0
-      A2A_NODE_PORT: "9015"
-      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-accumulator:9015/invoke
+      AMAZE_NODE_HOST: 0.0.0.0
+      AMAZE_NODE_PORT: "9015"
+      AMAZE_NODE_PUBLIC_ENDPOINT: http://remote-accumulator:9015/invoke
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
@@ -283,20 +283,20 @@ services:
 
   # Sprint 4 nodes ──────────────────────────────────────────────────────────
 
-  a2a-command:
+  remote-command:
     profiles: [sprint4]
     build:
       context: ..
-      dockerfile: docker/Dockerfile.a2a-node
+      dockerfile: docker/Dockerfile.remote-node
       args:
-        NODE_MODULE: examples.a2a_nodes.command_node
+        NODE_MODULE: examples.remote_nodes.command_node
     environment:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      A2A_NODE_HOST: 0.0.0.0
-      A2A_NODE_PORT: "9011"
-      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-command:9011/invoke
+      AMAZE_NODE_HOST: 0.0.0.0
+      AMAZE_NODE_PORT: "9011"
+      AMAZE_NODE_PUBLIC_ENDPOINT: http://remote-command:9011/invoke
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
@@ -311,22 +311,22 @@ services:
 
   # Sprint 2 nodes ──────────────────────────────────────────────────────────
 
-  a2a-llm-tool:
+  remote-llm-tool:
     profiles: [sprint2, sprint7]
     # ST-RLG-9 (sprint2): real OpenAI ChatOpenAI + MCP web_search
     # ST-RLG-28 (sprint7): LangSmith trace propagation
     build:
       context: ..
-      dockerfile: docker/Dockerfile.a2a-node
+      dockerfile: docker/Dockerfile.remote-node
       args:
-        NODE_MODULE: examples.a2a_nodes.llm_tool_node
+        NODE_MODULE: examples.remote_nodes.llm_tool_node
     environment:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      A2A_NODE_HOST: 0.0.0.0
-      A2A_NODE_PORT: "9004"
-      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-llm-tool:9004/invoke
+      AMAZE_NODE_HOST: 0.0.0.0
+      AMAZE_NODE_PORT: "9004"
+      AMAZE_NODE_PUBLIC_ENDPOINT: http://remote-llm-tool:9004/invoke
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       MCP_URL: http://mcp:8000/mcp
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
@@ -341,21 +341,21 @@ services:
       timeout: 3s
       retries: 30
 
-  a2a-audit:
+  remote-audit:
     profiles: [sprint2]
     # ST-RLG-10, ST-RLG-12: audit no-op + config_echo handlers (single container)
     build:
       context: ..
-      dockerfile: docker/Dockerfile.a2a-node
+      dockerfile: docker/Dockerfile.remote-node
       args:
-        NODE_MODULE: examples.a2a_nodes.audit_node
+        NODE_MODULE: examples.remote_nodes.audit_node
     environment:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      A2A_NODE_HOST: 0.0.0.0
-      A2A_NODE_PORT: "9005"
-      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-audit:9005/invoke
+      AMAZE_NODE_HOST: 0.0.0.0
+      AMAZE_NODE_PORT: "9005"
+      AMAZE_NODE_PUBLIC_ENDPOINT: http://remote-audit:9005/invoke
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
@@ -368,21 +368,21 @@ services:
       timeout: 3s
       retries: 30
 
-  a2a-research-a:
+  remote-research-a:
     profiles: [sprint2]
     # ST-RLG-13: parallel fan-out branch A
     build:
       context: ..
-      dockerfile: docker/Dockerfile.a2a-node
+      dockerfile: docker/Dockerfile.remote-node
       args:
-        NODE_MODULE: examples.a2a_nodes.research_a_node
+        NODE_MODULE: examples.remote_nodes.research_a_node
     environment:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      A2A_NODE_HOST: 0.0.0.0
-      A2A_NODE_PORT: "9006"
-      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-research-a:9006/invoke
+      AMAZE_NODE_HOST: 0.0.0.0
+      AMAZE_NODE_PORT: "9006"
+      AMAZE_NODE_PUBLIC_ENDPOINT: http://remote-research-a:9006/invoke
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
@@ -395,21 +395,21 @@ services:
       timeout: 3s
       retries: 30
 
-  a2a-research-b:
+  remote-research-b:
     profiles: [sprint2]
     # ST-RLG-13: parallel fan-out branch B
     build:
       context: ..
-      dockerfile: docker/Dockerfile.a2a-node
+      dockerfile: docker/Dockerfile.remote-node
       args:
-        NODE_MODULE: examples.a2a_nodes.research_b_node
+        NODE_MODULE: examples.remote_nodes.research_b_node
     environment:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      A2A_NODE_HOST: 0.0.0.0
-      A2A_NODE_PORT: "9007"
-      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-research-b:9007/invoke
+      AMAZE_NODE_HOST: 0.0.0.0
+      AMAZE_NODE_PORT: "9007"
+      AMAZE_NODE_PUBLIC_ENDPOINT: http://remote-research-b:9007/invoke
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}
@@ -440,28 +440,28 @@ services:
     depends_on:
       orchestrator:
         condition: service_healthy
-      a2a-research:
+      remote-research:
         condition: service_healthy
-      a2a-writer:
+      remote-writer:
         condition: service_healthy
     restart: "no"
 
   # Sprint 7 nodes ──────────────────────────────────────────────────────────
 
-  a2a-cached:
+  remote-cached:
     profiles: [sprint7]
     build:
       context: ..
-      dockerfile: docker/Dockerfile.a2a-node
+      dockerfile: docker/Dockerfile.remote-node
       args:
-        NODE_MODULE: examples.a2a_nodes.cached_node
+        NODE_MODULE: examples.remote_nodes.cached_node
     environment:
       AMAZE_ORCHESTRATOR_URL: http://orchestrator:8001
       OTEL_EXPORTER_OTLP_ENDPOINT: http://orchestrator:4317
       OTEL_EXPORTER_OTLP_PROTOCOL: grpc
-      A2A_NODE_HOST: 0.0.0.0
-      A2A_NODE_PORT: "9017"
-      A2A_NODE_PUBLIC_ENDPOINT: http://a2a-cached:9017/invoke
+      AMAZE_NODE_HOST: 0.0.0.0
+      AMAZE_NODE_PORT: "9017"
+      AMAZE_NODE_PUBLIC_ENDPOINT: http://remote-cached:9017/invoke
       LANGCHAIN_TRACING_V2: ${LANGCHAIN_TRACING_V2:-false}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGCHAIN_PROJECT: ${LANGCHAIN_PROJECT:-aMazeGraph}

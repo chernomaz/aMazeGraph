@@ -1,7 +1,7 @@
 """Sprint 4 system tests — ST-RLG-19 through ST-RLG-22.
 
 All tests rely on the `sprint4_demo` session fixture (tests/conftest.py) which
-starts the a2a-command service and runs `main-langgraph` once, caching the result.
+starts the remote-command service and runs `main-langgraph` once, caching the result.
 
 Run against an already-up stack:
 
@@ -55,7 +55,19 @@ def _require_node(orchestrator_url: str, node_name: str) -> None:
     except httpx.TransportError as exc:
         pytest.skip(f"orchestrator unreachable ({exc}); is the stack running?")
     if r.status_code != 200:
-        pytest.skip(f"node '{node_name}' not registered; is a2a-command running?")
+        pytest.skip(f"node '{node_name}' not registered; is remote-command running?")
+
+
+# ── Guard: demo must exit 0 ──────────────────────────────────────────────────
+
+
+def test_sprint4_demo_exit_code(sprint4_demo: subprocess.CompletedProcess) -> None:
+    """Fail fast if the Sprint 4 demo crashed — all scenarios passed or were SKIPped."""
+    assert sprint4_demo.returncode == 0, (
+        f"Sprint 4 demo exited {sprint4_demo.returncode}.\n"
+        f"stdout:\n{sprint4_demo.stdout[-3000:]}\n"
+        f"stderr:\n{sprint4_demo.stderr[-3000:]}"
+    )
 
 
 # ── ST-RLG-19: Single-goto Command (case #14) ────────────────────────────────
@@ -152,7 +164,7 @@ def test_st_rlg_21_command_multi_goto(
 ) -> None:
     """Case #15: Command(goto=['cmd_sink_a','writer']) triggers mixed local+remote fan-out.
 
-    cmd_sink_a is a local node; writer is the a2a-writer remote node.
+    cmd_sink_a is a local node; writer is the remote-writer remote node.
     Both are targeted by Command in the same superstep.
 
     Verifies:
