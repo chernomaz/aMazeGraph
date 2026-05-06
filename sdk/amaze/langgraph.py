@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 _OTEL_INITIALIZED = False
 
 _shared_http_clients: dict[tuple[str, float], httpx.AsyncClient] = {}
+_shared_sync_http_clients: dict[tuple[str, float], httpx.Client] = {}
 
 
 def _get_shared_http_client(url: str, timeout: float) -> httpx.AsyncClient:
@@ -27,6 +28,13 @@ def _get_shared_http_client(url: str, timeout: float) -> httpx.AsyncClient:
     if key not in _shared_http_clients:
         _shared_http_clients[key] = httpx.AsyncClient(timeout=timeout)
     return _shared_http_clients[key]
+
+
+def _get_shared_sync_http_client(url: str, timeout: float) -> httpx.Client:
+    key = (url, timeout)
+    if key not in _shared_sync_http_clients:
+        _shared_sync_http_clients[key] = httpx.Client(timeout=timeout)
+    return _shared_sync_http_clients[key]
 
 
 class AmazeGraphError(Exception):
@@ -247,10 +255,12 @@ class AmazeGraph:
         graph_id: str,
         orchestrator_url: str | None = None,
         checkpointer: Any = None,
+        sync: bool = False,
         **langgraph_kwargs: Any,
     ) -> None:
         self.graph_id = graph_id
         self._checkpointer = checkpointer
+        self._sync = sync
         self.graph = StateGraph(state_schema, **langgraph_kwargs)
         url = orchestrator_url or os.environ.get("AMAZE_ORCHESTRATOR_URL")
         if not url:
@@ -273,7 +283,8 @@ class AmazeGraph:
     def remote_node(self, name: str) -> "AmazeGraph":
         self.remote_nodes.add(name)
         self._nodes.append(name)
-        self.graph.add_node(name, self._make_remote_proxy(name))
+        proxy = self._make_sync_remote_proxy(name) if self._sync else self._make_remote_proxy(name)
+        self.graph.add_node(name, proxy)
         return self
 
     def add_edge(self, start: str, end: str) -> "AmazeGraph":
@@ -330,6 +341,10 @@ class AmazeGraph:
     def _get_http_client(self) -> httpx.AsyncClient:
         timeout = float(os.environ.get("AMAZE_NODE_INVOKE_TIMEOUT", "30.0"))
         return _get_shared_http_client(self.orchestrator_url, timeout)
+
+    def _get_sync_http_client(self) -> httpx.Client:
+        timeout = float(os.environ.get("AMAZE_NODE_INVOKE_TIMEOUT", "30.0"))
+        return _get_shared_sync_http_client(self.orchestrator_url, timeout)
 
     def _make_event(
         self,
@@ -491,6 +506,217 @@ class AmazeGraph:
                 self._make_event("node-exit", node_name, trace_id, status="ok"),
             )
         return state_patch
+
+    def _sync_emit_event(self, client: httpx.Client, run_id: str, event: dict) -> None:
+        try:
+            client.post(f"{self.orchestrator_url}/runs/{run_id}/events", json=event)
+        except Exception:
+            pass  # events are best-effort; never break the node call
+
+    def _parse_remote_body_sync(
+        self,
+        body: dict,
+        node_name: str,
+        run_id: str | None,
+        trace_id: str | None,
+        client: httpx.Client,
+    ) -> "dict | LGCommand":
+        command_raw = body.get("command")
+        if command_raw is not None:
+            if not isinstance(command_raw, dict):
+                if run_id:
+                    self._sync_emit_event(client, run_id, self._make_event(
+                        "node-error", node_name, trace_id,
+                        status="error", error="invalid-command-shape", error_kind="proxy_block",
+                    ))
+                raise InvalidCommand(self.graph_id, node_name, "command must be a dict")
+
+            goto_raw = command_raw.get("goto")
+            if not goto_raw and goto_raw != 0:
+                if run_id:
+                    self._sync_emit_event(client, run_id, self._make_event(
+                        "node-error", node_name, trace_id,
+                        status="error", error="invalid-command-empty-goto", error_kind="proxy_block",
+                    ))
+                raise InvalidCommand(self.graph_id, node_name, "command.goto is required and non-empty")
+
+            if isinstance(goto_raw, str):
+                reconstructed = [goto_raw]
+                scalar = True
+            elif isinstance(goto_raw, dict) and goto_raw.get("__send__"):
+                reconstructed = [LGSend(goto_raw["node"], goto_raw["arg"])]
+                scalar = False
+            elif isinstance(goto_raw, list):
+                reconstructed = [
+                    LGSend(item["node"], item["arg"])
+                    if isinstance(item, dict) and item.get("__send__")
+                    else item
+                    for item in goto_raw
+                ]
+                scalar = False
+            else:
+                if run_id:
+                    self._sync_emit_event(client, run_id, self._make_event(
+                        "node-error", node_name, trace_id,
+                        status="error",
+                        error=f"invalid-command-goto-type:{type(goto_raw).__name__}",
+                        error_kind="proxy_block",
+                    ))
+                raise InvalidCommand(
+                    self.graph_id, node_name,
+                    f"command.goto must be str or list, got {type(goto_raw).__name__}",
+                )
+
+            known = set(self._nodes) | {"__end__"}
+            for item in reconstructed:
+                target_name = item.node if isinstance(item, LGSend) else item
+                if target_name not in known:
+                    if run_id:
+                        self._sync_emit_event(client, run_id, self._make_event(
+                            "node-error", node_name, trace_id,
+                            status="error",
+                            error=f"unknown-goto-target:{target_name}",
+                            error_kind="proxy_block",
+                        ))
+                    raise InvalidCommand(
+                        self.graph_id, node_name,
+                        f"command.goto target {target_name!r} not in graph",
+                    )
+
+            update_patch = command_raw.get("update") or {}
+            if not isinstance(update_patch, dict):
+                if run_id:
+                    self._sync_emit_event(client, run_id, self._make_event(
+                        "node-error", node_name, trace_id,
+                        status="error", error="invalid-command-update-type", error_kind="proxy_block",
+                    ))
+                raise InvalidCommand(self.graph_id, node_name, "command.update must be a dict")
+
+            if run_id:
+                self._sync_emit_event(client, run_id, self._make_event("node-exit", node_name, trace_id, status="ok"))
+            return LGCommand(update=update_patch, goto=goto_raw if scalar else reconstructed)
+
+        state_patch = body.get("state_patch")
+        if not isinstance(state_patch, dict):
+            if run_id:
+                self._sync_emit_event(client, run_id, self._make_event(
+                    "node-error", node_name, trace_id,
+                    status="error", error="invalid-state-patch", error_kind="node_error",
+                ))
+            raise InvalidStatePatch(self.graph_id, node_name, body)
+
+        if run_id:
+            self._sync_emit_event(client, run_id, self._make_event("node-exit", node_name, trace_id, status="ok"))
+        return state_patch
+
+    def _make_sync_remote_proxy(self, node_name: str) -> Callable[..., Any]:
+        def remote_proxy(state: dict, config: RunnableConfig | None = None) -> dict:
+            try:
+                from langgraph.config import get_config as _lg_get_config
+                _ctx_cfg = _lg_get_config()
+                cfg: dict = dict(_ctx_cfg) if _ctx_cfg else (dict(config) if isinstance(config, dict) else {})
+            except (ImportError, RuntimeError):
+                cfg = dict(config) if isinstance(config, dict) else {}
+            metadata = cfg.get("metadata") or {}
+
+            run_id = (state.get("run_id") if isinstance(state, dict) else None) or metadata.get("run_id")
+            trace_id = (state.get("trace_id") if isinstance(state, dict) else None) or metadata.get("trace_id")
+
+            raw_configurable = cfg.get("configurable") or {}
+            runtime_context = raw_configurable.get("__amaze_runtime_context__") or {}
+            if not isinstance(runtime_context, dict):
+                runtime_context = {}
+
+            _skip_prefixes = ("__pregel_", "checkpoint_")
+            clean_configurable: dict[str, Any] = {}
+            for _k, _v in raw_configurable.items():
+                if any(_k.startswith(_p) for _p in _skip_prefixes):
+                    continue
+                try:
+                    json.dumps(_v)
+                    clean_configurable[_k] = _v
+                except (TypeError, ValueError):
+                    pass
+
+            config_subset_raw = {
+                "tags": cfg.get("tags"),
+                "metadata": cfg.get("metadata"),
+                "configurable": clean_configurable if clean_configurable else None,
+                "run_name": cfg.get("run_name"),
+                "recursion_limit": cfg.get("recursion_limit"),
+            }
+            config_subset = {k: v for k, v in config_subset_raw.items() if v is not None}
+
+            langsmith_ctx = _extract_langsmith_context(cfg)
+
+            logger.info("▶ [%s] invoking remote node sync (graph=%s)", node_name, self.graph_id)
+            client = self._get_sync_http_client()
+
+            try:
+                r = client.get(f"{self.orchestrator_url}/resolve/node/{self.graph_id}/{node_name}")
+            except httpx.ConnectError as exc:
+                raise RemoteNodeInvokeError(self.graph_id, node_name, None, str(exc)) from exc
+
+            if r.status_code == 404:
+                raise RemoteNodeNotRegistered(self.graph_id, node_name)
+            if r.status_code // 100 != 2:
+                raise RemoteNodeInvokeError(self.graph_id, node_name, r.status_code, r.text)
+
+            resolved_data = r.json()
+            endpoint = resolved_data["endpoint"]
+
+            if run_id:
+                self._sync_emit_event(client, run_id, self._make_event("node-enter", node_name, trace_id))
+
+            payload = {
+                "graph_id": self.graph_id,
+                "node_name": node_name,
+                "run_id": run_id,
+                "trace_id": trace_id,
+                "state": state,
+                "config": config_subset,
+                "runtime_context": runtime_context,
+                "langsmith_context": langsmith_ctx,
+            }
+
+            try:
+                response = client.post(endpoint, json=payload)
+            except httpx.TimeoutException as exc:
+                if run_id:
+                    self._sync_emit_event(client, run_id, self._make_event(
+                        "node-error", node_name, trace_id,
+                        status="error", error=f"timeout: {exc}", error_kind="timeout",
+                    ))
+                raise RemoteNodeInvokeError(self.graph_id, node_name, None, str(exc)) from exc
+            except httpx.TransportError as exc:
+                if run_id:
+                    self._sync_emit_event(client, run_id, self._make_event(
+                        "node-error", node_name, trace_id,
+                        status="error", error=f"transport: {exc}", error_kind="proxy_block",
+                    ))
+                raise RemoteNodeInvokeError(self.graph_id, node_name, None, str(exc)) from exc
+
+            if response.status_code // 100 != 2:
+                if run_id:
+                    self._sync_emit_event(client, run_id, self._make_event(
+                        "node-error", node_name, trace_id,
+                        status="error", error=f"http-{response.status_code}", error_kind="node_error",
+                    ))
+                raise RemoteNodeInvokeError(self.graph_id, node_name, response.status_code, response.text)
+
+            try:
+                body = response.json()
+            except json.JSONDecodeError as exc:
+                if run_id:
+                    self._sync_emit_event(client, run_id, self._make_event(
+                        "node-error", node_name, trace_id,
+                        status="error", error="invalid-json", error_kind="node_error",
+                    ))
+                raise InvalidStatePatch(self.graph_id, node_name, response.text) from exc
+
+            return self._parse_remote_body_sync(body, node_name, run_id, trace_id, client)
+
+        return remote_proxy
 
     def _make_remote_proxy(
         self, node_name: str
