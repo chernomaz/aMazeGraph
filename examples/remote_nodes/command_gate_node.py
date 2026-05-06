@@ -38,7 +38,7 @@ def compact(value: Any, max_len: int = 700) -> str:
 
 
 @remote_node(graph_id=GRAPH_ID, node_name="command_gate")
-async def command_gate(state: AgentState) -> Command:
+async def command_gate(state: AgentState) -> Command[Literal["final_answer", "human_review"]]:
     node = "command_gate"
 
     logger.info("[%s] ENTER state=%s", node, compact(state))
