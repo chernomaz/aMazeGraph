@@ -153,6 +153,23 @@ async def _unregister_best_effort(orchestrator_url: str, body: dict) -> None:
 _REGISTERED_HANDLERS: list[tuple[str, str, NodeHandler, int | None]] = []
 
 
+def _handler_accepts_config(handler: NodeHandler) -> bool:
+    """Return True if the handler has a 2nd parameter (config)."""
+    try:
+        sig = inspect.signature(handler)
+    except (TypeError, ValueError):
+        return True  # assume yes on failure
+    params = [
+        p for p in sig.parameters.values()
+        if p.kind in (
+            inspect.Parameter.POSITIONAL_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        )
+    ]
+    return len(params) >= 2
+
+
 def _handler_accepts_runtime(handler: NodeHandler) -> bool:
     """Return True if the handler signature has a 3rd parameter named
     `runtime` or annotated `Runtime`. Used to decide whether to inject the
@@ -292,8 +309,10 @@ def _build_handlers_app(
         if _handler_accepts_runtime(handler):
             runtime = Runtime(req.runtime_context or {})
             result = await handler(req.state, handler_config, runtime)
-        else:
+        elif _handler_accepts_config(handler):
             result = await handler(req.state, handler_config)
+        else:
+            result = await handler(req.state)
         # langgraph.types.Command return → translate to wire {"command": {...}} (Cases 14+15).
         # isinstance check is collision-safe: plain dicts (even with a "command" key)
         # always go through the state_patch path below.
