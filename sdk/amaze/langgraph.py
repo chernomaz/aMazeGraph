@@ -9,11 +9,14 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 import httpx
+from langchain_core.messages import BaseMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import StateGraph
 from langgraph.types import Command as LGCommand
 from langgraph.types import Send as LGSend
 from opentelemetry import trace
+
+from sdk.amaze._messages import serialize_messages
 
 logger = logging.getLogger(__name__)
 
@@ -233,6 +236,19 @@ def _extract_langsmith_context(cfg: dict) -> dict | None:
             project_name = h.project_name
             break
     return {"parent_run_id": str(parent_run_id), "project_name": project_name}
+
+
+def _serialize_state(state: dict) -> dict:
+    """Convert BaseMessage objects in state to JSON-serializable dicts."""
+    result = {}
+    for k, v in state.items():
+        if isinstance(v, list) and v and isinstance(v[0], BaseMessage):
+            result[k] = serialize_messages(v)
+        elif isinstance(v, BaseMessage):
+            result[k] = serialize_messages([v])[0]
+        else:
+            result[k] = v
+    return result
 
 
 # run_id / trace_id are per-run tracking metadata injected by the driver,
@@ -674,7 +690,7 @@ class AmazeGraph:
                 "node_name": node_name,
                 "run_id": run_id,
                 "trace_id": trace_id,
-                "state": state,
+                "state": _serialize_state(state),
                 "config": config_subset,
                 "runtime_context": runtime_context,
                 "langsmith_context": langsmith_ctx,
@@ -825,7 +841,7 @@ class AmazeGraph:
                     "node_name": node_name,
                     "run_id": run_id,
                     "trace_id": trace_id,
-                    "state": state,
+                    "state": _serialize_state(state),
                     "config": config_subset,
                     "runtime_context": runtime_context,
                     "langsmith_context": langsmith_ctx,
