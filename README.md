@@ -185,6 +185,23 @@ Remote nodes can run anywhere that can reach the orchestrator port. The driver c
 
 The orchestrator container bundles **Redis** and **Jaeger** — one `up` command starts everything.
 
+### Infrastructure only (orchestrator + Redis + Jaeger)
+
+Use this when setting up a new machine or when you want to run remote nodes separately:
+
+```bash
+docker compose -f docker/compose.remote-langgraph.yml up --build orchestrator
+```
+
+Verify it is ready:
+
+```bash
+curl http://localhost:8011/health
+# {"status": "ok", "redis": "ok", "jaeger": "ok"}
+```
+
+### Full stack (orchestrator + sample nodes + demo driver)
+
 ```bash
 git clone <repo-url>
 cd aMazeGraph
@@ -282,6 +299,76 @@ The node POSTs its endpoint to the orchestrator on startup and removes it on shu
 export AMAZE_ORCHESTRATOR_URL=http://10.0.1.10:8011
 python -m examples.remote_langgraph.main
 ```
+
+### Creating a new node from scratch
+
+A remote node is a plain async function decorated with `@remote_node`. A ready-to-use template is at `examples/remote_nodes/my_node.py`:
+
+```python
+from sdk.amaze import remote_node, serve_node
+
+@remote_node(graph_id="my_graph", node_name="my_node")
+async def my_node_handler(state: dict, config: dict) -> dict:
+    result = f"processed: {state.get('input', '')}"
+    return {"output": result}
+
+if __name__ == "__main__":
+    serve_node()
+```
+
+Run it without Docker (pick any free port, e.g. 9020):
+
+```bash
+export AMAZE_NODE_PORT=9020
+export AMAZE_NODE_PUBLIC_ENDPOINT=http://localhost:9020/invoke
+export AMAZE_ORCHESTRATOR_URL=http://localhost:8011
+
+python -m examples.remote_nodes.my_node
+```
+
+Verify it registered:
+
+```bash
+curl http://localhost:9020/healthz
+curl http://localhost:8011/resolve/node/my_graph/my_node
+```
+
+Copy `my_node.py`, rename it, change `GRAPH_ID` / `node_name`, and add your logic. Each node must use a unique port.
+
+### Wiring the driver
+
+In the driver, replace `StateGraph` with `AmazeGraph` and declare remote nodes with `builder.remote_node(...)`:
+
+```python
+from sdk.amaze import AmazeGraph
+
+# graph_id must match GRAPH_ID in every remote node file
+# sync=True  → use graph.stream() / graph.invoke() (plain Python)
+# sync=False → use graph.astream() / graph.ainvoke() (asyncio, default)
+builder = AmazeGraph(
+    AgentState,
+    graph_id="my_graph",
+    orchestrator_url="http://localhost:8011",
+    sync=True,
+)
+
+builder.remote_node("my_node")   # no local function — resolved via orchestrator
+
+# All edges and conditional routing stay exactly the same as with StateGraph
+builder.add_edge(START, "my_node")
+builder.add_edge("my_node", END)
+
+graph = builder.compile()
+
+# sync=True: use the normal sync API
+for step in graph.stream(initial_state, config=config, stream_mode="updates"):
+    print(step)
+```
+
+**Key rules:**
+- `graph_id` in the driver must match `GRAPH_ID` in the node file — this is how the orchestrator routes calls.
+- `sync=True` keeps your existing `graph.stream()` / `graph.invoke()` calls unchanged.
+- `sync=False` (default) requires `graph.astream()` / `graph.ainvoke()` inside `asyncio.run()`.
 
 ---
 
