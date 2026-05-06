@@ -367,6 +367,7 @@ for step in graph.stream(initial_state, config=config, stream_mode="updates"):
 
 **Key rules:**
 - `graph_id` in the driver must match `GRAPH_ID` in the node file — this is how the orchestrator routes calls.
+- The remote node handler must be `async def` — it runs inside a FastAPI server regardless of whether the driver uses `sync=True` or not.
 - `sync=True` keeps your existing `graph.stream()` / `graph.invoke()` calls unchanged.
 - `sync=False` (default) requires `graph.astream()` / `graph.ainvoke()` inside `asyncio.run()`.
 
